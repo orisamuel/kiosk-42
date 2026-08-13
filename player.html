@@ -17,15 +17,46 @@
     font-family: 'Heebo', 'Segoe UI', sans-serif;
   }
 
-  /* ── Content stage ── */
+  /* ── Waiting screen ──
+     Always rendered, sitting UNDER the stage. Any moment where content isn't
+     ready yet (loading, switching, a broken item) shows this instead of black. */
+  #idle {
+    position: fixed; inset: 0; z-index: 1;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    direction: rtl;
+    background: radial-gradient(ellipse at 50% -20%, #2a2416 0%, #0d0f14 55%, #000 100%);
+    color: #F1F5F9;
+  }
+  /* vmin so the waiting screen scales the same on landscape and portrait screens */
+  #fbClock {
+    font-size: 22vmin; font-weight: 800; line-height: 1;
+    letter-spacing: 0.02em;
+    color: #FBBF24;
+    text-shadow: 0 0 80px rgba(245, 158, 11, 0.35);
+    font-variant-numeric: tabular-nums;
+    direction: ltr;
+  }
+  #fbDate { font-size: 4.6vmin; font-weight: 400; color: #94A3B8; margin-top: 2vh; text-align: center; }
+  #fbMessage {
+    font-size: 5vmin; font-weight: 700; color: #F1F5F9;
+    margin-top: 7vh; text-align: center; padding: 0 8vmin; line-height: 1.35;
+  }
+  #fbName { font-size: 3.2vmin; font-weight: 600; color: #64748B; margin-top: 3vh; text-align: center; }
+  #fbHint { font-size: 2.4vmin; color: #475569; margin-top: 2vh; text-align: center; padding: 0 6vmin; }
+
+  /* ── Content stage ──
+     Hidden until the content actually starts playing/loading is done, so a
+     slow item never paints a black rectangle over the waiting screen. */
   #stage {
     position: fixed; inset: 0;
     background: #000;
-    opacity: 1;
-    transition: opacity 0.35s ease;
-    z-index: 1;
+    opacity: 0;
+    transition: opacity 0.18s ease;
+    z-index: 2;
+    pointer-events: none;
   }
-  #stage.fading { opacity: 0; }
+  #stage.visible { opacity: 1; }
   #stage iframe, #stage video, #stage img {
     position: absolute; inset: 0;
     width: 100%; height: 100%;
@@ -40,30 +71,6 @@
     inset: auto; top: 50%; left: 50%;
     transform-origin: center center;
   }
-
-  /* ── Idle / fallback screen ── */
-  #fallback {
-    position: fixed; inset: 0; z-index: 5;
-    display: flex; flex-direction: column;
-    align-items: center; justify-content: center;
-    direction: rtl;
-    background: radial-gradient(ellipse at 50% -20%, #2a2416 0%, #0d0f14 55%, #000 100%);
-    color: #F1F5F9;
-    transition: opacity 0.5s ease;
-  }
-  #fallback.hidden { opacity: 0; pointer-events: none; }
-  /* vmin so the idle screen scales the same on landscape and portrait screens */
-  #fbClock {
-    font-size: 22vmin; font-weight: 800; line-height: 1;
-    letter-spacing: 0.02em;
-    color: #FBBF24;
-    text-shadow: 0 0 80px rgba(245, 158, 11, 0.35);
-    font-variant-numeric: tabular-nums;
-    direction: ltr;
-  }
-  #fbDate { font-size: 4.6vmin; font-weight: 400; color: #94A3B8; margin-top: 2vh; text-align: center; }
-  #fbName { font-size: 3.4vmin; font-weight: 600; color: #475569; margin-top: 5vh; text-align: center; }
-  #fbHint { font-size: 2.4vmin; color: #475569; margin-top: 2vh; direction: rtl; text-align: center; padding: 0 6vmin; }
 
   /* ── Clock overlay while content plays ── */
   #clockPill {
@@ -98,20 +105,27 @@
 </head>
 <body>
 
-<div id="stage"></div>
-
-<div id="fallback">
+<div id="idle">
   <div id="fbClock">--:--</div>
   <div id="fbDate"></div>
+  <div id="fbMessage"></div>
   <div id="fbName"></div>
   <div id="fbHint"></div>
 </div>
+
+<div id="stage"></div>
 
 <div id="clockPill">--:--</div>
 <div id="offlineDot"></div>
 
 <script>
 'use strict';
+
+// How long to wait for an item to actually start before giving up on it.
+// The waiting screen is showing throughout, so this is never a black screen.
+const LOAD_TIMEOUT_MS   = 7000;
+const DRIVE_TRY_TIMEOUT = 4500;   // per Drive URL strategy
+const SINGLE_RETRY_MS   = 20000;  // lone broken item: retry instead of rotating
 
 // ════════════════════════════════════════════════════════════
 // State
@@ -124,15 +138,17 @@ const S = {
   currentId: null,
   currentTitle: null,
   currentItemJson: null,
+  playCount: 0,         // completed plays of the current video
   advanceTimer: null,
   safetyTimer: null,
+  loadTimer: null,
   pollTimer: null,
   yt: null,             // current YT.Player instance
   ytApiPromise: null,
   failStreak: 0,
   wakeLock: null,
-  driveFallback: false, // true once a Drive file had to use Drive's own player
   driveWatchdog: null,
+  driveTimed: false,    // Drive fell back to its own player → advance on a timer
   coverResize: null
 };
 
@@ -145,6 +161,7 @@ const $ = id => document.getElementById(id);
 (function boot() {
   startClocks();
   requestWakeLock();
+  goFullscreen();
 
   if (!CONFIG.SCRIPT_URL || CONFIG.SCRIPT_URL.includes('PASTE_')) {
     $('fbName').textContent = 'הקיוסק של 42';
@@ -205,6 +222,7 @@ function applyData(res, fromCache) {
 
   S.settings = settings;
   $('fbName').textContent = settings.kioskName || '';
+  $('fbMessage').textContent = settings.idleMessage || '';
   updateClockVisibility();
 
   const active = (res.items || []).filter(i => i.active);
@@ -212,7 +230,7 @@ function applyData(res, fromCache) {
   if (!active.length) {
     stopCurrent();
     S.items = []; S.idx = -1; S.currentId = null; S.currentTitle = null;
-    showFallback(true);
+    showStage(false);
     return;
   }
 
@@ -240,7 +258,7 @@ function applyData(res, fromCache) {
 // Rotation
 // ════════════════════════════════════════════════════════════
 function next() {
-  if (!S.items.length) { showFallback(true); return; }
+  if (!S.items.length) { showStage(false); return; }
   const prevId = S.currentId;
   S.idx = (S.idx + 1) % S.items.length;
   const item = S.items[S.idx];
@@ -259,65 +277,110 @@ function renderItem(item) {
   S.currentId = item.id;
   S.currentTitle = item.title;
   S.currentItemJson = JSON.stringify(item);
-  showFallback(false);
+  S.playCount = 0;
+  S.driveTimed = false;
 
+  // Hide the stage while the new item loads → the waiting screen shows through.
+  showStage(false);
   const stage = $('stage');
-  stage.classList.add('fading');
-  setTimeout(() => {
-    stage.innerHTML = '';
-    switch (item.type) {
-      case 'youtube': renderYouTube(stage, item); break;
-      case 'video':   renderVideo(stage, item);   break;
-      case 'drive':   renderDrive(stage, item);   break;
-      case 'image':   renderImage(stage, item);   break;
-      default:        renderWebsite(stage, item); break;
-    }
-    stage.classList.remove('fading');
-    armTimers(item);
-  }, 350);
+  stage.innerHTML = '';
+
+  switch (item.type) {
+    case 'youtube': renderYouTube(stage, item); break;
+    case 'video':   renderVideo(stage, item);   break;
+    case 'drive':   renderDrive(stage, item);   break;
+    case 'image':   renderImage(stage, item);   break;
+    default:        renderWebsite(stage, item); break;
+  }
+
+  // If it never starts, move on (or retry when it's the only item) rather than
+  // sitting on a dead item.
+  clearTimeout(S.loadTimer);
+  S.loadTimer = setTimeout(() => {
+    if (S.currentId !== item.id || stageVisible()) return;
+    if (S.items.length > 1) next();
+    else { S.currentId = null; setTimeout(() => renderItem(item), SINGLE_RETRY_MS); }
+  }, LOAD_TIMEOUT_MS);
+
+  armTimers(item);
+}
+
+// Content is actually up — reveal it over the waiting screen.
+function contentReady(item) {
+  if (S.currentId !== item.id) return;
+  clearTimeout(S.loadTimer);
+  showStage(true);
 }
 
 function stopCurrent() {
-  clearTimeout(S.advanceTimer);
-  clearTimeout(S.safetyTimer);
-  clearTimeout(S.driveWatchdog);
+  clearTimeout(S.advanceTimer);  S.advanceTimer = null;
+  clearTimeout(S.safetyTimer);   S.safetyTimer = null;
+  clearTimeout(S.loadTimer);     S.loadTimer = null;
+  clearTimeout(S.driveWatchdog); S.driveWatchdog = null;
   if (S.coverResize) { window.removeEventListener('resize', S.coverResize); S.coverResize = null; }
   if (S.yt) { try { S.yt.destroy(); } catch (_) {} S.yt = null; }
+}
+
+function isVideoType(item) {
+  return item.type === 'youtube' || item.type === 'video' || item.type === 'drive';
+}
+
+// 0 = play forever, N = play N times. Older cached items only have `loop`.
+function loopsOf(item) {
+  if (typeof item.loops === 'number') return item.loops;
+  return item.loop ? 0 : 1;
 }
 
 function armTimers(item) {
   clearTimeout(S.advanceTimer); S.advanceTimer = null;
   clearTimeout(S.safetyTimer);  S.safetyTimer = null;
   const def = (S.settings && S.settings.defaultDuration) || 60;
+  const loops = loopsOf(item);
 
-  if (item.type === 'website' || item.type === 'image') {
+  // Timer-driven: anything that can't tell us when it finished.
+  if (!isVideoType(item) || S.driveTimed) {
     const dur = item.duration > 0 ? item.duration : def;
     S.advanceTimer = setTimeout(next, Math.max(5, dur) * 1000);
-  } else if (item.type === 'drive' && S.driveFallback) {
-    // Drive's own player can't report 'ended', so it always needs a duration.
-    const dur = item.duration > 0 ? item.duration : def;
-    S.advanceTimer = setTimeout(next, Math.max(5, dur) * 1000);
-  } else {
-    // Videos advance on their 'ended' event; duration (if set) caps them.
-    if (item.duration > 0) {
-      S.advanceTimer = setTimeout(next, Math.max(5, item.duration) * 1000);
-    }
-    // Whatever happens, never stay stuck on one item —
-    // unless it loops forever on purpose (loop + no duration).
-    if (!(item.loop && item.duration === 0)) {
-      S.safetyTimer = setTimeout(next, 30 * 60 * 1000);
-    }
+    return;
   }
+
+  // Videos run on their own length and advance after `loops` plays.
+  // An explicit duration acts as a hard cap (useful for live streams).
+  if (item.duration > 0) {
+    S.advanceTimer = setTimeout(next, Math.max(5, item.duration) * 1000);
+  }
+  // Never sit forever on a stuck video — unless it's meant to loop forever.
+  if (loops !== 0) {
+    S.safetyTimer = setTimeout(next, 30 * 60 * 1000);
+  }
+}
+
+// Once the real length is known, size the safety net to it instead of 30 min.
+function tuneSafety(item, videoLength, elapsed) {
+  const loops = loopsOf(item);
+  if (loops === 0 || item.duration > 0 || !(videoLength > 0)) return;
+  const remaining = videoLength * (loops - S.playCount) - (elapsed || 0);
+  clearTimeout(S.safetyTimer);
+  S.safetyTimer = setTimeout(next, (remaining + 30) * 1000);
+}
+
+// A video finished one pass: replay it or move on.
+function onVideoEnded(item, replay) {
+  if (S.currentId !== item.id) return;
+  S.playCount++;
+  const loops = loopsOf(item);
+  if (loops === 0 || S.playCount < loops) replay();
+  else next();
 }
 
 // ════════════════════════════════════════════════════════════
 // Renderers
 // ════════════════════════════════════════════════════════════
 
-// Per-item override wins; otherwise the global setting; otherwise letterbox.
+// Per-item override wins; otherwise the global setting.
 function fitFor(item) {
   if (item.fit === 'cover' || item.fit === 'contain') return item.fit;
-  return (S.settings && S.settings.videoFit === 'cover') ? 'cover' : 'contain';
+  return (S.settings && S.settings.videoFit === 'contain') ? 'contain' : 'cover';
 }
 
 // Size a 16:9 iframe so it covers the viewport, cropping the overflow.
@@ -340,8 +403,10 @@ function coverIframe(f) {
 
 function renderWebsite(stage, item) {
   const f = document.createElement('iframe');
-  f.src = item.url;
   f.setAttribute('allow', 'autoplay; fullscreen; encrypted-media');
+  f.setAttribute('allowfullscreen', '');
+  f.addEventListener('load', () => contentReady(item));
+  f.src = item.url;
   stage.appendChild(f);
   // Websites reflow to the viewport, so they are never scaled — a portrait
   // screen simply gets the site's mobile layout.
@@ -349,25 +414,49 @@ function renderWebsite(stage, item) {
 
 function renderImage(stage, item) {
   const img = document.createElement('img');
-  img.src = item.url;
   img.alt = item.title;
   img.style.objectFit = fitFor(item);
+  img.addEventListener('load', () => contentReady(item));
+  img.addEventListener('error', () => setTimeout(next, 1500), { once: true });
+  img.src = item.url;
   stage.appendChild(img);
 }
 
-function renderVideo(stage, item) {
+// Shared setup for a <video> element: autoplay muted (the only way browsers
+// allow unattended playback), reveal on first frame, count loops.
+function setupVideoEl(item, src, onFail) {
   const v = document.createElement('video');
-  v.src = item.url;
+  v.src = src;
   v.autoplay = true;
   v.playsInline = true;
+  v.setAttribute('playsinline', '');
+  v.setAttribute('autoplay', '');
   v.muted = !!(S.settings && S.settings.muted);
-  v.loop = !!item.loop;
+  v.loop = loopsOf(item) === 0;
   v.style.objectFit = fitFor(item);
-  if (!item.loop) v.addEventListener('ended', () => next(), { once: true });
-  v.addEventListener('error', () => setTimeout(next, 3000), { once: true });
-  stage.appendChild(v);
-  const p = v.play();
-  if (p && p.catch) p.catch(() => { v.muted = true; v.play().catch(() => {}); });
+
+  v.addEventListener('playing', () => contentReady(item));
+  v.addEventListener('loadedmetadata', () => tuneSafety(item, v.duration, 0));
+  if (!v.loop) {
+    v.addEventListener('ended', () => onVideoEnded(item, () => {
+      v.currentTime = 0;
+      v.play().catch(() => {});
+    }));
+  }
+  v.addEventListener('error', onFail, { once: true });
+
+  const tryPlay = () => {
+    const p = v.play();
+    // Unmuted autoplay is blocked unless the kiosk browser allows it — retry muted.
+    if (p && p.catch) p.catch(() => { v.muted = true; v.play().catch(() => {}); });
+  };
+  tryPlay();
+  v.addEventListener('canplay', tryPlay, { once: true });
+  return v;
+}
+
+function renderVideo(stage, item) {
+  stage.appendChild(setupVideoEl(item, item.url, () => setTimeout(next, 1500)));
 }
 
 function driveId(url) {
@@ -379,47 +468,53 @@ function driveId(url) {
   return null;
 }
 
-// Drive videos: stream the file straight into a <video> tag so mute/loop/ended
-// all work. Files big enough to hit Google's scan interstitial fail that way,
-// so fall back to Drive's own embedded player (advances on a timer instead).
+// Drive videos must play by themselves — no tap on a play button. So we stream
+// the file into a <video> tag (autoplay + muted + loop all work there) instead
+// of embedding Drive's player, which requires a click.
+//   1. usercontent /download with confirm=t — also serves big, virus-scanned files
+//   2. the classic uc?export=download endpoint
+//   3. last resort: Drive's own embed (may need a tap; advances on a timer)
 function renderDrive(stage, item) {
   const id = driveId(item.url);
-  if (!id) { setTimeout(next, 3000); return; }
-  S.driveFallback = false;
+  if (!id) { setTimeout(next, 1500); return; }
 
-  const useDrivePlayer = () => {
-    if (S.currentId !== item.id || S.driveFallback) return;
-    S.driveFallback = true;
+  const strategies = [
+    'https://drive.usercontent.google.com/download?id=' + id + '&export=download&confirm=t',
+    'https://drive.google.com/uc?export=download&id=' + id
+  ];
+  let attempt = 0;
+
+  const tryNextStrategy = () => {
+    if (S.currentId !== item.id) return;
     clearTimeout(S.driveWatchdog);
+    if (attempt >= strategies.length) { useDriveEmbed(); return; }
+    const src = strategies[attempt++];
+    stage.innerHTML = '';
+    const v = setupVideoEl(item, src, tryNextStrategy);
+    stage.appendChild(v);
+    // Google answers some files with an HTML page instead of video bytes, and a
+    // <video> stays silently black for that — no 'error' event. Poll instead.
+    S.driveWatchdog = setTimeout(() => {
+      if (S.currentId !== item.id) return;
+      if (v.readyState < 2) tryNextStrategy();
+    }, DRIVE_TRY_TIMEOUT);
+  };
+
+  const useDriveEmbed = () => {
+    if (S.currentId !== item.id) return;
+    S.driveTimed = true;   // no 'ended' from this player → run on a timer
     stage.innerHTML = '';
     const f = document.createElement('iframe');
-    f.src = 'https://drive.google.com/file/d/' + id + '/preview';
     f.setAttribute('allow', 'autoplay; fullscreen');
+    f.setAttribute('allowfullscreen', '');
+    f.addEventListener('load', () => contentReady(item));
+    f.src = 'https://drive.google.com/file/d/' + id + '/preview';
     stage.appendChild(f);
     if (fitFor(item) === 'cover') coverIframe(f);
     armTimers(item);
   };
 
-  const v = document.createElement('video');
-  v.src = 'https://drive.google.com/uc?export=download&id=' + id;
-  v.autoplay = true;
-  v.playsInline = true;
-  v.muted = !!(S.settings && S.settings.muted);
-  v.loop = !!item.loop;
-  v.style.objectFit = fitFor(item);
-  if (!item.loop) v.addEventListener('ended', () => next(), { once: true });
-  v.addEventListener('error', useDrivePlayer, { once: true });
-  stage.appendChild(v);
-  const p = v.play();
-  if (p && p.catch) p.catch(() => { v.muted = true; v.play().catch(() => {}); });
-
-  // Google answers big files with an HTML scan page instead of the video, and a
-  // <video> tag stays silently black for that — no 'error' event. If nothing is
-  // actually playing after 12s, switch to Drive's own player.
-  clearTimeout(S.driveWatchdog);
-  S.driveWatchdog = setTimeout(() => {
-    if (v.readyState < 3 || v.currentTime === 0) useDrivePlayer();
-  }, 12000);
+  tryNextStrategy();
 }
 
 function ytId(url) {
@@ -444,37 +539,33 @@ function loadYtApi() {
 
 async function renderYouTube(stage, item) {
   const vid = ytId(item.url);
-  if (!vid) { setTimeout(next, 3000); return; }
+  if (!vid) { setTimeout(next, 1500); return; }
 
   const holder = document.createElement('div');
   holder.id = 'yt-' + Date.now();
   stage.appendChild(holder);
 
   await loadYtApi();
-  if (S.currentId !== item.id) return; // rotation moved on while API loaded
+  if (S.currentId !== item.id) return; // rotation moved on while the API loaded
   const wantCover = fitFor(item) === 'cover';
-
   const muted = !!(S.settings && S.settings.muted);
-  const playerVars = {
-    autoplay: 1, controls: 0, disablekb: 1, rel: 0,
-    modestbranding: 1, playsinline: 1, iv_load_policy: 3, fs: 0,
-    mute: muted ? 1 : 0
-  };
-  if (item.loop) {
-    // YouTube loops only via a single-video "playlist" of itself.
-    playerVars.loop = 1;
-    playerVars.playlist = vid;
-  }
+
   S.yt = new YT.Player(holder.id, {
     videoId: vid,
     width: '100%', height: '100%',
-    playerVars: playerVars,
+    playerVars: {
+      autoplay: 1, controls: 0, disablekb: 1, rel: 0,
+      modestbranding: 1, playsinline: 1, iv_load_policy: 3, fs: 0,
+      mute: muted ? 1 : 0
+      // No loop/playlist vars: repeats are counted on the ENDED event so that
+      // "play N times" and "forever" share one code path.
+    },
     events: {
       onReady: e => {
         if (muted) e.target.mute();
         if (wantCover) coverIframe(e.target.getIframe());
         e.target.playVideo();
-        // Browser blocked unmuted autoplay? Fall back to muted playback.
+        // Blocked unmuted autoplay? Fall back to muted playback.
         setTimeout(() => {
           try {
             if (S.yt && S.currentId === item.id &&
@@ -483,37 +574,33 @@ async function renderYouTube(stage, item) {
               S.yt.playVideo();
             }
           } catch (_) {}
-        }, 4000);
+        }, 2500);
       },
       onStateChange: e => {
-        if (e.data === YT.PlayerState.ENDED) { next(); return; }
-        // Once actual length is known, tighten the 30-min safety timer.
-        if (e.data === YT.PlayerState.PLAYING && item.duration === 0 && !item.loop) {
-          try {
-            const d = e.target.getDuration();
-            if (d > 0) {
-              clearTimeout(S.safetyTimer);
-              S.safetyTimer = setTimeout(next, (d - e.target.getCurrentTime() + 20) * 1000);
-            }
-          } catch (_) {}
+        if (e.data === YT.PlayerState.ENDED) {
+          onVideoEnded(item, () => { e.target.seekTo(0); e.target.playVideo(); });
+          return;
+        }
+        if (e.data === YT.PlayerState.PLAYING) {
+          contentReady(item);
+          try { tuneSafety(item, e.target.getDuration(), e.target.getCurrentTime()); } catch (_) {}
         }
       },
-      onError: () => setTimeout(next, 3000)
+      onError: () => setTimeout(next, 1500)
     }
   });
 }
 
 // ════════════════════════════════════════════════════════════
-// Idle screen + clocks
+// Waiting screen + clocks
 // ════════════════════════════════════════════════════════════
-function showFallback(show) {
-  $('fallback').classList.toggle('hidden', !show);
-  if (show) { S.currentTitle = null; }
+function showStage(show) {
+  $('stage').classList.toggle('visible', !!show);
   updateClockVisibility();
 }
 
-function fallbackVisible() {
-  return !$('fallback').classList.contains('hidden');
+function stageVisible() {
+  return $('stage').classList.contains('visible');
 }
 
 function startClocks() {
@@ -531,7 +618,7 @@ function startClocks() {
 }
 
 function updateClockVisibility() {
-  const show = S.settings && S.settings.showClock && !fallbackVisible();
+  const show = S.settings && S.settings.showClock && stageVisible();
   $('clockPill').classList.toggle('show', !!show);
 }
 
@@ -546,6 +633,21 @@ async function requestWakeLock() {
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') requestWakeLock();
 });
+
+// Browsers only grant fullscreen from a user gesture, so try immediately (works
+// in kiosk browsers that allow it) and again on the first touch of the screen.
+function goFullscreen() {
+  const el = document.documentElement;
+  const req = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen;
+  if (!req) return;
+  const attempt = () => { try { req.call(el); } catch (_) {} };
+  attempt();
+  const onGesture = () => {
+    if (!document.fullscreenElement) attempt();
+  };
+  ['pointerdown', 'keydown', 'touchstart'].forEach(ev =>
+    document.addEventListener(ev, onGesture, { passive: true }));
+}
 
 // Nightly reload keeps memory fresh on long-running kiosk browsers.
 function checkDailyReload() {
