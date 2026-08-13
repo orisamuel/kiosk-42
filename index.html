@@ -179,6 +179,7 @@
       <select class="form-select" id="fType" onchange="updateDurationHint()">
         <option value="website">🌐 אתר</option>
         <option value="youtube">▶️ יוטיוב</option>
+        <option value="drive">📁 סרטון מגוגל דרייב</option>
         <option value="video">🎬 קובץ וידאו (mp4)</option>
         <option value="image">🖼️ תמונה</option>
       </select>
@@ -214,6 +215,7 @@ document.getElementById('sheetLink').href          = CONFIG.SHEETS_URL;
 const TYPE_META = {
   youtube: { emoji: '▶️', label: 'יוטיוב' },
   video:   { emoji: '🎬', label: 'וידאו' },
+  drive:   { emoji: '📁', label: 'גוגל דרייב' },
   website: { emoji: '🌐', label: 'אתר' },
   image:   { emoji: '🖼️', label: 'תמונה' }
 };
@@ -359,9 +361,17 @@ function closeModal() {
 
 function detectType(url) {
   if (/youtu\.be|youtube\.com/i.test(url)) return 'youtube';
+  if (/drive\.google\.com|drive\.usercontent\.google\.com/i.test(url)) return 'drive';
   if (/\.(mp4|webm|mov|m4v|ogv)(\?|#|$)/i.test(url)) return 'video';
   if (/\.(jpe?g|png|gif|webp|avif|svg)(\?|#|$)/i.test(url)) return 'image';
   return 'website';
+}
+
+function driveId(url) {
+  let m = url.match(/\/file\/d\/([\w-]{10,})/);
+  if (m) return m[1];
+  m = url.match(/[?&]id=([\w-]{10,})/);
+  return m ? m[1] : null;
 }
 
 function autoDetectType() {
@@ -376,7 +386,7 @@ function updateDurationHint() {
   const type = document.getElementById('fType').value;
   const durHint = document.getElementById('durationHint');
   const typeHint = document.getElementById('typeHint');
-  const isVideo = type === 'youtube' || type === 'video';
+  const isVideo = type === 'youtube' || type === 'video' || type === 'drive';
   document.getElementById('loopGroup').style.display = isVideo ? '' : 'none';
   if (isVideo) {
     durHint.textContent = document.getElementById('fLoop').checked
@@ -386,9 +396,13 @@ function updateDurationHint() {
     const def = settings ? settings.defaultDuration : 60;
     durHint.textContent = 'ריק = ברירת המחדל (' + def + ' שניות)';
   }
-  typeHint.textContent = type === 'website'
-    ? 'שימו לב: חלק מהאתרים חוסמים הצגה בתוך מסך אחר — תרוץ בדיקה אוטומטית בשמירה.'
-    : '';
+  if (type === 'website') {
+    typeHint.textContent = 'שימו לב: חלק מהאתרים חוסמים הצגה בתוך מסך אחר — תרוץ בדיקה אוטומטית בשמירה.';
+  } else if (type === 'drive') {
+    typeHint.textContent = 'הקובץ בדרייב חייב להיות משותף כ"כל מי שיש לו הקישור". לקבצים כבדים (מעל ~50MB) כדאי להגדיר גם משך תצוגה — ראו README.';
+  } else {
+    typeHint.textContent = '';
+  }
 }
 
 function ytId(url) {
@@ -404,11 +418,12 @@ async function saveItem() {
   const title = document.getElementById('fTitle').value.trim();
   const type = document.getElementById('fType').value;
   const duration = parseInt(document.getElementById('fDuration').value) || 0;
-  const isVideo = type === 'youtube' || type === 'video';
+  const isVideo = type === 'youtube' || type === 'video' || type === 'drive';
   const loop = String(isVideo && document.getElementById('fLoop').checked);
 
   if (!url || !title) return showToast('נא למלא כתובת ושם', 'warning');
   if (type === 'youtube' && !ytId(url)) return showToast('כתובת היוטיוב לא תקינה', 'warning');
+  if (type === 'drive' && !driveId(url)) return showToast('לא זוהה קובץ בכתובת הדרייב — העתיקו את קישור השיתוף המלא', 'warning');
 
   const btn = document.getElementById('saveItemBtn');
   btn.disabled = true;

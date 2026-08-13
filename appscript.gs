@@ -80,7 +80,7 @@ function findRow(sheet, colIndex, value) {
 // ============================================================
 // TABLE: PLAYLIST
 // Schema: id(0), title(1), type(2), url(3), duration(4), active(5), order(6), created(7), loop(8)
-//   type:     youtube | video | website | image
+//   type:     youtube | video | drive | website | image
 //   duration: seconds. 0 = play to end (videos) / use defaultDuration (websites, images)
 //   active:   'כן' / 'לא'
 //   loop:     'כן' / 'לא' — videos only. loop+duration=0 → repeats forever;

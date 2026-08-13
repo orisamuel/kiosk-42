@@ -122,7 +122,8 @@ const S = {
   yt: null,             // current YT.Player instance
   ytApiPromise: null,
   failStreak: 0,
-  wakeLock: null
+  wakeLock: null,
+  driveFallback: false  // true once a Drive file had to use Drive's own player
 };
 
 const CACHE_KEY = 'kioskCache';
@@ -157,7 +158,9 @@ const $ = id => document.getElementById(id);
 async function poll() {
   try {
     const res = await apiCall('getPlaylist', { current: S.currentTitle || 'מסך המתנה' });
-    if (res.success) {
+    // A non-JSON reply (Google error page during a redeploy) must never be
+    // mistaken for an empty playlist — that would blank a working screen.
+    if (res.success && Array.isArray(res.items)) {
       S.failStreak = 0;
       applyData(res, false);
     } else {
@@ -255,6 +258,7 @@ function renderItem(item) {
     switch (item.type) {
       case 'youtube': renderYouTube(stage, item); break;
       case 'video':   renderVideo(stage, item);   break;
+      case 'drive':   renderDrive(stage, item);   break;
       case 'image':   renderImage(stage, item);   break;
       default:        renderWebsite(stage, item); break;
     }
@@ -275,6 +279,10 @@ function armTimers(item) {
   const def = (S.settings && S.settings.defaultDuration) || 60;
 
   if (item.type === 'website' || item.type === 'image') {
+    const dur = item.duration > 0 ? item.duration : def;
+    S.advanceTimer = setTimeout(next, Math.max(5, dur) * 1000);
+  } else if (item.type === 'drive' && S.driveFallback) {
+    // Drive's own player can't report 'ended', so it always needs a duration.
     const dur = item.duration > 0 ? item.duration : def;
     S.advanceTimer = setTimeout(next, Math.max(5, dur) * 1000);
   } else {
@@ -316,6 +324,45 @@ function renderVideo(stage, item) {
   v.loop = !!item.loop;
   if (!item.loop) v.addEventListener('ended', () => next(), { once: true });
   v.addEventListener('error', () => setTimeout(next, 3000), { once: true });
+  stage.appendChild(v);
+  const p = v.play();
+  if (p && p.catch) p.catch(() => { v.muted = true; v.play().catch(() => {}); });
+}
+
+function driveId(url) {
+  let m = url.match(/\/file\/d\/([\w-]{10,})/);
+  if (m) return m[1];
+  m = url.match(/[?&]id=([\w-]{10,})/);
+  if (m) return m[1];
+  if (/^[\w-]{20,}$/.test(url)) return url;
+  return null;
+}
+
+// Drive videos: stream the file straight into a <video> tag so mute/loop/ended
+// all work. Files big enough to hit Google's scan interstitial fail that way,
+// so fall back to Drive's own embedded player (advances on a timer instead).
+function renderDrive(stage, item) {
+  const id = driveId(item.url);
+  if (!id) { setTimeout(next, 3000); return; }
+  S.driveFallback = false;
+
+  const v = document.createElement('video');
+  v.src = 'https://drive.google.com/uc?export=download&id=' + id;
+  v.autoplay = true;
+  v.playsInline = true;
+  v.muted = !!(S.settings && S.settings.muted);
+  v.loop = !!item.loop;
+  if (!item.loop) v.addEventListener('ended', () => next(), { once: true });
+  v.addEventListener('error', () => {
+    if (S.currentId !== item.id) return;
+    S.driveFallback = true;
+    stage.innerHTML = '';
+    const f = document.createElement('iframe');
+    f.src = 'https://drive.google.com/file/d/' + id + '/preview';
+    f.setAttribute('allow', 'autoplay; fullscreen');
+    stage.appendChild(f);
+    armTimers(item);
+  }, { once: true });
   stage.appendChild(v);
   const p = v.play();
   if (p && p.catch) p.catch(() => { v.muted = true; v.play().catch(() => {}); });
