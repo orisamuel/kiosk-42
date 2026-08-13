@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0d0f14">
+<title>הקיוסק של 42 — ניהול</title>
+<link rel="stylesheet" href="styles.css">
+<script src="config.js"></script>
+<script src="utils.js"></script>
+<style>
+  /* ── Page-specific ── */
+  .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+  .toolbar .btn { flex: 1; min-width: 130px; }
+
+  .status-line {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 14px;
+    background: var(--bg-elevated);
+    border-radius: var(--radius-md);
+    font-size: 0.9rem;
+  }
+  .status-dot {
+    width: 11px; height: 11px; border-radius: 50%; flex-shrink: 0;
+    background: var(--text-muted);
+  }
+  .status-dot.ok    { background: var(--success); box-shadow: 0 0 8px var(--success); }
+  .status-dot.bad   { background: var(--danger);  box-shadow: 0 0 8px var(--danger); }
+
+  .pl-item {
+    display: flex; flex-direction: column; gap: 6px;
+    padding: 14px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-md);
+    margin-bottom: 10px;
+  }
+  .pl-item.inactive { opacity: 0.5; }
+  .pl-top { display: flex; align-items: center; gap: 10px; }
+  .pl-emoji { font-size: 1.3rem; }
+  .pl-title { font-weight: 700; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pl-url {
+    font-size: 0.78rem; color: var(--text-muted);
+    direction: ltr; text-align: left;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .pl-bottom { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .pl-meta { font-size: 0.8rem; color: var(--text-secondary); flex: 1; }
+  .badge {
+    font-size: 0.72rem; font-weight: 600;
+    padding: 2px 8px; border-radius: var(--radius-pill);
+    background: var(--glass-bg); border: 1px solid var(--glass-border);
+    color: var(--text-secondary);
+  }
+  .badge-off { color: var(--danger); border-color: var(--danger); }
+
+  .icon-btn {
+    background: var(--glass-bg); border: 1px solid var(--glass-border);
+    border-radius: var(--radius-sm);
+    padding: 6px 10px; font-size: 0.95rem;
+    color: var(--text-primary); transition: var(--t-fast);
+  }
+  .icon-btn:hover { background: var(--glass-hover); }
+  .icon-btn:disabled { opacity: 0.4; cursor: default; }
+
+  .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .settings-grid .full { grid-column: 1 / -1; }
+  .check-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
+  .check-row input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--accent); }
+
+  .section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  .hint { font-size: 0.78rem; color: var(--text-muted); margin-top: 4px; }
+  .card + .card { margin-top: 16px; }
+
+  @media (max-width: 480px) {
+    .settings-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="loading-screen" id="loadingScreen">
+  <div class="loading-spinner"></div>
+  <div class="loading-progress" id="loadingProgress">טוען...</div>
+</div>
+
+<div id="mainContent">
+
+  <header class="app-header" style="border-radius: var(--radius-lg);">
+    <div>
+      <div class="app-title" id="appTitle"></div>
+      <div class="app-subtitle" id="appSubtitle"></div>
+    </div>
+    <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">🌙</button>
+  </header>
+
+  <!-- ── Kiosk status ── -->
+  <div class="card" style="margin-top: 16px;">
+    <div class="status-line">
+      <div class="status-dot" id="statusDot"></div>
+      <span id="statusText">בודק חיבור למסך...</span>
+    </div>
+    <div class="toolbar">
+      <button class="btn btn-primary" onclick="openAddModal()">➕ הוספת פריט</button>
+      <button class="btn btn-secondary" onclick="refreshKiosk()" id="refreshBtn">🔄 רענון המסך</button>
+      <a class="btn btn-secondary" href="player.html" target="_blank">📺 פתיחת הנגן</a>
+      <a class="btn btn-secondary" id="sheetLink" href="#" target="_blank">📊 פתיחת הגיליון</a>
+    </div>
+  </div>
+
+  <!-- ── Playlist ── -->
+  <div class="card">
+    <div class="section-head">
+      <h2 style="font-size:1.1rem;">🎞️ הפלייליסט</h2>
+      <span class="badge" id="plCount"></span>
+    </div>
+    <div id="playlist">טוען...</div>
+  </div>
+
+  <!-- ── Settings ── -->
+  <div class="card">
+    <div class="section-head">
+      <h2 style="font-size:1.1rem;">⚙️ הגדרות המסך</h2>
+    </div>
+    <div class="settings-grid">
+      <div class="form-group full">
+        <label class="form-label">שם הקיוסק (מוצג במסך ההמתנה)</label>
+        <input class="form-input" id="setName" type="text">
+      </div>
+      <div class="form-group">
+        <label class="form-label">בדיקת עדכונים (שניות)</label>
+        <input class="form-input" id="setRefresh" type="number" min="15" step="5">
+        <div class="hint">כל כמה זמן המסך בודק אם הפלייליסט השתנה</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">משך ברירת מחדל (שניות)</label>
+        <input class="form-input" id="setDefault" type="number" min="5" step="5">
+        <div class="hint">לאתרים ותמונות בלי משך מוגדר</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">ריענון יומי בשעה</label>
+        <input class="form-input" id="setReloadHour" type="number" min="-1" max="23">
+        <div class="hint">4 = ‏04:00 בלילה. ‏-1 לביטול</div>
+      </div>
+      <div class="form-group">
+        <div class="check-row" style="margin-top: 26px;">
+          <input type="checkbox" id="setMuted">
+          <label for="setMuted">השתקת סרטונים</label>
+        </div>
+        <div class="check-row">
+          <input type="checkbox" id="setClock">
+          <label for="setClock">שעון קטן על המסך</label>
+        </div>
+      </div>
+    </div>
+    <button class="btn btn-primary" style="width:100%; margin-top:8px;" onclick="saveSettings()" id="saveSettingsBtn">💾 שמירת הגדרות</button>
+  </div>
+
+</div>
+
+<!-- ── Add / Edit modal ── -->
+<div class="modal-backdrop" id="itemModal">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title" id="modalTitle">הוספת פריט</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">כתובת (URL)</label>
+      <input class="form-input" id="fUrl" type="url" dir="ltr" placeholder="https://..." oninput="autoDetectType()">
+    </div>
+    <div class="form-group">
+      <label class="form-label">שם (לתצוגה ברשימה)</label>
+      <input class="form-input" id="fTitle" type="text" placeholder="למשל: סרטון תדמית">
+    </div>
+    <div class="form-group">
+      <label class="form-label">סוג</label>
+      <select class="form-select" id="fType" onchange="updateDurationHint()">
+        <option value="website">🌐 אתר</option>
+        <option value="youtube">▶️ יוטיוב</option>
+        <option value="video">🎬 קובץ וידאו (mp4)</option>
+        <option value="image">🖼️ תמונה</option>
+      </select>
+      <div class="hint" id="typeHint"></div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">משך תצוגה (שניות)</label>
+      <input class="form-input" id="fDuration" type="number" min="0" placeholder="">
+      <div class="hint" id="durationHint"></div>
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">ביטול</button>
+      <button class="btn btn-primary" onclick="saveItem()" id="saveItemBtn">שמירה</button>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+initTheme();
+document.getElementById('appTitle').textContent    = CONFIG.APP_NAME;
+document.getElementById('appSubtitle').textContent = CONFIG.APP_SUBTITLE;
+document.getElementById('sheetLink').href          = CONFIG.SHEETS_URL;
+
+const TYPE_META = {
+  youtube: { emoji: '▶️', label: 'יוטיוב' },
+  video:   { emoji: '🎬', label: 'וידאו' },
+  website: { emoji: '🌐', label: 'אתר' },
+  image:   { emoji: '🖼️', label: 'תמונה' }
+};
+
+let items = [];
+let settings = null;
+let editingId = null;
+
+warmupServer();
+
+(async function init() {
+  updateLoadingProgress('טוען פלייליסט...');
+  try {
+    await loadAll();
+  } catch (e) {
+    showToast(e.message, 'error');
+    document.getElementById('playlist').innerHTML =
+      '<p style="color:var(--danger);">שגיאה בטעינה: ' + e.message + '</p>';
+  } finally {
+    hideLoadingScreen();
+  }
+  refreshStatus();
+  setInterval(refreshStatus, 30000);
+})();
+
+async function loadAll() {
+  const res = await apiCall('getPlaylist');
+  if (!res.success) throw new Error(res.message || 'שגיאה');
+  items = res.items;
+  settings = res.settings;
+  renderList();
+  fillSettings();
+}
+
+// ── Playlist list ──────────────────────────────────────────
+
+function renderList() {
+  const el = document.getElementById('playlist');
+  document.getElementById('plCount').textContent =
+    items.filter(i => i.active).length + ' פעילים מתוך ' + items.length;
+
+  if (!items.length) {
+    el.innerHTML = '<p style="color:var(--text-muted);">הפלייליסט ריק — המסך מציג שעון המתנה. לחצו על ➕ להוספת פריט ראשון.</p>';
+    return;
+  }
+
+  el.innerHTML = items.map((it, i) => {
+    const meta = TYPE_META[it.type] || TYPE_META.website;
+    const dur = durationLabel(it);
+    return `
+    <div class="pl-item ${it.active ? '' : 'inactive'}">
+      <div class="pl-top">
+        <span class="pl-emoji">${meta.emoji}</span>
+        <span class="pl-title">${esc(it.title)}</span>
+        ${it.active ? '' : '<span class="badge badge-off">מושבת</span>'}
+      </div>
+      <div class="pl-url">${esc(it.url)}</div>
+      <div class="pl-bottom">
+        <span class="pl-meta">${meta.label} · ${dur}</span>
+        <button class="icon-btn" title="למעלה" onclick="move('${it.id}','up')" ${i === 0 ? 'disabled' : ''}>▲</button>
+        <button class="icon-btn" title="למטה" onclick="move('${it.id}','down')" ${i === items.length - 1 ? 'disabled' : ''}>▼</button>
+        <button class="icon-btn" title="${it.active ? 'השבתה' : 'הפעלה'}" onclick="toggleActive('${it.id}', ${it.active})">${it.active ? '⏸' : '▶'}</button>
+        <button class="icon-btn" title="עריכה" onclick="openEditModal('${it.id}')">✏️</button>
+        <button class="icon-btn" title="מחיקה" onclick="removeItem('${it.id}')">🗑️</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function durationLabel(it) {
+  if (it.duration > 0) return it.duration + ' שניות';
+  if (it.type === 'youtube' || it.type === 'video') return 'עד סוף הסרטון';
+  return 'ברירת מחדל (' + (settings ? settings.defaultDuration : 60) + ' שניות)';
+}
+
+function esc(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                  .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+async function move(id, dir) {
+  try {
+    const res = await apiCall('moveItem', { id, dir });
+    if (!res.success) return showToast(res.message, 'error');
+    await loadAll();
+  } catch (e) { showToast(e.message, 'error'); }
+}
+
+async function toggleActive(id, current) {
+  try {
+    const res = await apiCall('updateItem', { id, active: String(!current) });
+    if (!res.success) return showToast(res.message, 'error');
+    showToast(current ? 'הפריט הושבת' : 'הפריט הופעל', 'success');
+    await loadAll();
+  } catch (e) { showToast(e.message, 'error'); }
+}
+
+async function removeItem(id) {
+  const it = items.find(x => x.id === id);
+  if (!confirm('למחוק את "' + (it ? it.title : '') + '" מהפלייליסט?')) return;
+  try {
+    const res = await apiCall('deleteItem', { id });
+    if (!res.success) return showToast(res.message, 'error');
+    showToast('נמחק', 'success');
+    await loadAll();
+  } catch (e) { showToast(e.message, 'error'); }
+}
+
+// ── Add / Edit modal ───────────────────────────────────────
+
+function openAddModal() {
+  editingId = null;
+  document.getElementById('modalTitle').textContent = 'הוספת פריט';
+  document.getElementById('fUrl').value = '';
+  document.getElementById('fTitle').value = '';
+  document.getElementById('fType').value = 'website';
+  document.getElementById('fDuration').value = '';
+  updateDurationHint();
+  document.getElementById('itemModal').classList.add('open');
+}
+
+function openEditModal(id) {
+  const it = items.find(x => x.id === id);
+  if (!it) return;
+  editingId = id;
+  document.getElementById('modalTitle').textContent = 'עריכת פריט';
+  document.getElementById('fUrl').value = it.url;
+  document.getElementById('fTitle').value = it.title;
+  document.getElementById('fType').value = it.type;
+  document.getElementById('fDuration').value = it.duration || '';
+  updateDurationHint();
+  document.getElementById('itemModal').classList.add('open');
+}
+
+function closeModal() {
+  document.getElementById('itemModal').classList.remove('open');
+}
+
+function detectType(url) {
+  if (/youtu\.be|youtube\.com/i.test(url)) return 'youtube';
+  if (/\.(mp4|webm|mov|m4v|ogv)(\?|#|$)/i.test(url)) return 'video';
+  if (/\.(jpe?g|png|gif|webp|avif|svg)(\?|#|$)/i.test(url)) return 'image';
+  return 'website';
+}
+
+function autoDetectType() {
+  if (editingId) return; // don't fight the user while editing
+  const url = document.getElementById('fUrl').value.trim();
+  if (!url) return;
+  document.getElementById('fType').value = detectType(url);
+  updateDurationHint();
+}
+
+function updateDurationHint() {
+  const type = document.getElementById('fType').value;
+  const durHint = document.getElementById('durationHint');
+  const typeHint = document.getElementById('typeHint');
+  if (type === 'youtube' || type === 'video') {
+    durHint.textContent = 'ריק או 0 = ניגון עד סוף הסרטון';
+  } else {
+    const def = settings ? settings.defaultDuration : 60;
+    durHint.textContent = 'ריק = ברירת המחדל (' + def + ' שניות)';
+  }
+  typeHint.textContent = type === 'website'
+    ? 'שימו לב: חלק מהאתרים חוסמים הצגה בתוך מסך אחר — תרוץ בדיקה אוטומטית בשמירה.'
+    : '';
+}
+
+function ytId(url) {
+  if (/^[\w-]{11}$/.test(url)) return url;
+  let m = url.match(/[?&]v=([\w-]{11})/);
+  if (m) return m[1];
+  m = url.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|shorts\/|live\/))([\w-]{11})/);
+  return m ? m[1] : null;
+}
+
+async function saveItem() {
+  const url = document.getElementById('fUrl').value.trim();
+  const title = document.getElementById('fTitle').value.trim();
+  const type = document.getElementById('fType').value;
+  const duration = parseInt(document.getElementById('fDuration').value) || 0;
+
+  if (!url || !title) return showToast('נא למלא כתובת ושם', 'warning');
+  if (type === 'youtube' && !ytId(url)) return showToast('כתובת היוטיוב לא תקינה', 'warning');
+
+  const btn = document.getElementById('saveItemBtn');
+  btn.disabled = true;
+  try {
+    const res = editingId
+      ? await apiCall('updateItem', { id: editingId, title, type, url, duration })
+      : await apiCall('addItem', { title, type, url, duration });
+    if (!res.success) return showToast(res.message, 'error');
+    closeModal();
+    showToast('נשמר ✓', 'success');
+    await loadAll();
+    if (type === 'website') checkEmbedWarn(url);
+  } catch (e) {
+    showToast(e.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function checkEmbedWarn(url) {
+  try {
+    const r = await apiCall('checkEmbed', { url });
+    if (r.success && r.embeddable === false) {
+      showToast('⚠ האתר הזה חוסם הטמעה — כנראה יוצג ריק במסך (' + (r.reason || '') + ')', 'warning', 9000);
+    }
+  } catch (_) {}
+}
+
+// ── Settings ───────────────────────────────────────────────
+
+function fillSettings() {
+  if (!settings) return;
+  document.getElementById('setName').value = settings.kioskName;
+  document.getElementById('setRefresh').value = settings.refreshSeconds;
+  document.getElementById('setDefault').value = settings.defaultDuration;
+  document.getElementById('setReloadHour').value = settings.dailyReloadHour;
+  document.getElementById('setMuted').checked = settings.muted;
+  document.getElementById('setClock').checked = settings.showClock;
+}
+
+async function saveSettings() {
+  const btn = document.getElementById('saveSettingsBtn');
+  btn.disabled = true;
+  try {
+    const res = await apiCall('updateSettings', {
+      kioskName: document.getElementById('setName').value.trim(),
+      refreshSeconds: document.getElementById('setRefresh').value,
+      defaultDuration: document.getElementById('setDefault').value,
+      dailyReloadHour: document.getElementById('setReloadHour').value,
+      muted: String(document.getElementById('setMuted').checked),
+      showClock: String(document.getElementById('setClock').checked)
+    });
+    if (!res.success) return showToast(res.message, 'error');
+    showToast('ההגדרות נשמרו — יחולו על המסך בבדיקת העדכונים הבאה', 'success');
+    await loadAll();
+  } catch (e) {
+    showToast(e.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ── Kiosk status & control ─────────────────────────────────
+
+async function refreshKiosk() {
+  const btn = document.getElementById('refreshBtn');
+  btn.disabled = true;
+  try {
+    const res = await apiCall('refreshKiosk');
+    showToast(res.success ? res.message : res.message, res.success ? 'success' : 'error');
+  } catch (e) {
+    showToast(e.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function refreshStatus() {
+  const dot = document.getElementById('statusDot');
+  const text = document.getElementById('statusText');
+  try {
+    const res = await apiCall('getStatus');
+    if (!res.success) throw new Error(res.message);
+    if (!res.ts) {
+      dot.className = 'status-dot';
+      text.textContent = 'אין עדיין דיווח מהמסך — ודאו שהנגן פתוח על הקיוסק';
+      return;
+    }
+    const agoSec = Math.round((Date.now() - res.ts) / 1000);
+    const grace = Math.max(((settings && settings.refreshSeconds) || 60) * 3, 300);
+    if (agoSec <= grace) {
+      dot.className = 'status-dot ok';
+      text.textContent = 'המסך פעיל · מציג: ' + (res.item || '?') + ' · עדכון אחרון לפני ' + agoText(agoSec);
+    } else {
+      dot.className = 'status-dot bad';
+      text.textContent = 'אין קשר מהמסך כבר ' + agoText(agoSec) + ' — כדאי לבדוק את הקיוסק';
+    }
+  } catch (e) {
+    dot.className = 'status-dot';
+    text.textContent = 'לא ניתן לבדוק את מצב המסך';
+  }
+}
+
+function agoText(sec) {
+  if (sec < 90) return sec + ' שניות';
+  if (sec < 5400) return Math.round(sec / 60) + ' דקות';
+  return Math.round(sec / 3600) + ' שעות';
+}
+
+// close modal on backdrop click
+document.getElementById('itemModal').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeModal();
+});
+</script>
+
+</body>
+</html>

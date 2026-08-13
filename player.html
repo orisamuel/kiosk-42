@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="he">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#000000">
+<title>הקיוסק של 42 — נגן</title>
+<script src="config.js"></script>
+<script src="utils.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #000;
+    overflow: hidden;
+    cursor: none;
+    font-family: 'Heebo', 'Segoe UI', sans-serif;
+  }
+
+  /* ── Content stage ── */
+  #stage {
+    position: fixed; inset: 0;
+    background: #000;
+    opacity: 1;
+    transition: opacity 0.35s ease;
+    z-index: 1;
+  }
+  #stage.fading { opacity: 0; }
+  #stage iframe, #stage video, #stage img {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    border: 0; display: block;
+    background: #000;
+  }
+  #stage video, #stage img { object-fit: contain; }
+
+  /* ── Idle / fallback screen ── */
+  #fallback {
+    position: fixed; inset: 0; z-index: 5;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    direction: rtl;
+    background: radial-gradient(ellipse at 50% -20%, #2a2416 0%, #0d0f14 55%, #000 100%);
+    color: #F1F5F9;
+    transition: opacity 0.5s ease;
+  }
+  #fallback.hidden { opacity: 0; pointer-events: none; }
+  #fbClock {
+    font-size: 14vw; font-weight: 800; line-height: 1;
+    letter-spacing: 0.02em;
+    color: #FBBF24;
+    text-shadow: 0 0 80px rgba(245, 158, 11, 0.35);
+    font-variant-numeric: tabular-nums;
+    direction: ltr;
+  }
+  #fbDate { font-size: 3vw; font-weight: 400; color: #94A3B8; margin-top: 2vh; }
+  #fbName { font-size: 2.2vw; font-weight: 600; color: #475569; margin-top: 5vh; }
+  #fbHint { font-size: 1.4vw; color: #475569; margin-top: 2vh; direction: rtl; }
+
+  /* ── Clock overlay while content plays ── */
+  #clockPill {
+    position: fixed; bottom: 22px; left: 22px; z-index: 10;
+    padding: 8px 18px;
+    background: rgba(0, 0, 0, 0.55);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 999px;
+    color: #fff; font-size: 1.4rem; font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    backdrop-filter: blur(6px);
+    direction: ltr;
+    display: none;
+  }
+  #clockPill.show { display: block; }
+
+  /* ── Offline indicator (only after repeated fetch failures) ── */
+  #offlineDot {
+    position: fixed; top: 16px; left: 16px; z-index: 10;
+    width: 10px; height: 10px; border-radius: 50%;
+    background: #EF4444;
+    box-shadow: 0 0 8px #EF4444;
+    display: none;
+    animation: blink 1.6s ease infinite;
+  }
+  #offlineDot.show { display: block; }
+  @keyframes blink { 50% { opacity: 0.25; } }
+
+  /* toasts are irrelevant on the kiosk screen */
+  .toast-container { display: none !important; }
+</style>
+</head>
+<body>
+
+<div id="stage"></div>
+
+<div id="fallback">
+  <div id="fbClock">--:--</div>
+  <div id="fbDate"></div>
+  <div id="fbName"></div>
+  <div id="fbHint"></div>
+</div>
+
+<div id="clockPill">--:--</div>
+<div id="offlineDot"></div>
+
+<script>
+'use strict';
+
+// ════════════════════════════════════════════════════════════
+// State
+// ════════════════════════════════════════════════════════════
+const S = {
+  items: [],            // active items, sorted by order
+  settings: null,
+  token: null,          // reloadToken adopted on first fetch; change → reload
+  idx: -1,
+  currentId: null,
+  currentTitle: null,
+  currentItemJson: null,
+  advanceTimer: null,
+  safetyTimer: null,
+  pollTimer: null,
+  yt: null,             // current YT.Player instance
+  ytApiPromise: null,
+  failStreak: 0,
+  wakeLock: null
+};
+
+const CACHE_KEY = 'kioskCache';
+const $ = id => document.getElementById(id);
+
+// ════════════════════════════════════════════════════════════
+// Boot
+// ════════════════════════════════════════════════════════════
+(function boot() {
+  startClocks();
+  requestWakeLock();
+
+  if (!CONFIG.SCRIPT_URL || CONFIG.SCRIPT_URL.includes('PASTE_')) {
+    $('fbName').textContent = 'הקיוסק של 42';
+    $('fbHint').textContent = '⚠ יש להגדיר את SCRIPT_URL בקובץ config.js';
+    return;
+  }
+
+  // Start instantly from the last known playlist, then fetch fresh.
+  try {
+    const cached = JSON.parse(localStorage.getItem(CACHE_KEY));
+    if (cached && cached.items) applyData(cached, true);
+  } catch (_) {}
+
+  warmupServer();
+  poll();
+})();
+
+// ════════════════════════════════════════════════════════════
+// Polling — fetch playlist + report heartbeat
+// ════════════════════════════════════════════════════════════
+async function poll() {
+  try {
+    const res = await apiCall('getPlaylist', { current: S.currentTitle || 'מסך המתנה' });
+    if (res.success) {
+      S.failStreak = 0;
+      applyData(res, false);
+    } else {
+      S.failStreak++;
+    }
+  } catch (e) {
+    S.failStreak++;
+  }
+  $('offlineDot').classList.toggle('show', S.failStreak >= 3);
+
+  const sec = (S.settings && S.settings.refreshSeconds) || 60;
+  clearTimeout(S.pollTimer);
+  S.pollTimer = setTimeout(poll, Math.max(15, sec) * 1000);
+
+  checkDailyReload();
+}
+
+function applyData(res, fromCache) {
+  const settings = res.settings || {};
+
+  if (!fromCache) {
+    // Admin pressed "רענן מסך" (or pushed new frontend) → full reload.
+    if (S.token !== null && settings.reloadToken !== S.token) {
+      location.reload();
+      return;
+    }
+    S.token = settings.reloadToken;
+    try {
+      localStorage.setItem(CACHE_KEY, JSON.stringify({ items: res.items, settings: settings }));
+    } catch (_) {}
+  }
+
+  S.settings = settings;
+  $('fbName').textContent = settings.kioskName || '';
+  updateClockVisibility();
+
+  const active = (res.items || []).filter(i => i.active);
+
+  if (!active.length) {
+    stopCurrent();
+    S.items = []; S.idx = -1; S.currentId = null; S.currentTitle = null;
+    showFallback(true);
+    return;
+  }
+
+  const changed = JSON.stringify(active) !== JSON.stringify(S.items);
+  if (!changed) {
+    if (S.currentId === null) { S.idx = -1; next(); }
+    return;
+  }
+
+  const oldCurrentId = S.currentId;
+  S.items = active;
+  const newIdx = oldCurrentId ? active.findIndex(i => i.id === oldCurrentId) : -1;
+
+  if (newIdx !== -1) {
+    // Current item survived the update — keep playing unless it was edited.
+    S.idx = newIdx;
+    if (JSON.stringify(active[newIdx]) !== S.currentItemJson) renderItem(active[newIdx]);
+  } else {
+    S.idx = -1;
+    next();
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// Rotation
+// ════════════════════════════════════════════════════════════
+function next() {
+  if (!S.items.length) { showFallback(true); return; }
+  const prevId = S.currentId;
+  S.idx = (S.idx + 1) % S.items.length;
+  const item = S.items[S.idx];
+
+  // Single static item — don't flash-reload it, just re-arm the timer.
+  if (S.items.length === 1 && item.id === prevId &&
+      (item.type === 'website' || item.type === 'image')) {
+    armTimers(item);
+    return;
+  }
+  renderItem(item);
+}
+
+function renderItem(item) {
+  stopCurrent();
+  S.currentId = item.id;
+  S.currentTitle = item.title;
+  S.currentItemJson = JSON.stringify(item);
+  showFallback(false);
+
+  const stage = $('stage');
+  stage.classList.add('fading');
+  setTimeout(() => {
+    stage.innerHTML = '';
+    switch (item.type) {
+      case 'youtube': renderYouTube(stage, item); break;
+      case 'video':   renderVideo(stage, item);   break;
+      case 'image':   renderImage(stage, item);   break;
+      default:        renderWebsite(stage, item); break;
+    }
+    stage.classList.remove('fading');
+    armTimers(item);
+  }, 350);
+}
+
+function stopCurrent() {
+  clearTimeout(S.advanceTimer);
+  clearTimeout(S.safetyTimer);
+  if (S.yt) { try { S.yt.destroy(); } catch (_) {} S.yt = null; }
+}
+
+function armTimers(item) {
+  clearTimeout(S.advanceTimer);
+  clearTimeout(S.safetyTimer);
+  const def = (S.settings && S.settings.defaultDuration) || 60;
+
+  if (item.type === 'website' || item.type === 'image') {
+    const dur = item.duration > 0 ? item.duration : def;
+    S.advanceTimer = setTimeout(next, Math.max(5, dur) * 1000);
+  } else {
+    // Videos advance on their 'ended' event; duration (if set) caps them.
+    if (item.duration > 0) {
+      S.advanceTimer = setTimeout(next, Math.max(5, item.duration) * 1000);
+    }
+    // Whatever happens, never stay stuck on one item.
+    S.safetyTimer = setTimeout(next, 30 * 60 * 1000);
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// Renderers
+// ════════════════════════════════════════════════════════════
+function renderWebsite(stage, item) {
+  const f = document.createElement('iframe');
+  f.src = item.url;
+  f.setAttribute('allow', 'autoplay; fullscreen; encrypted-media');
+  stage.appendChild(f);
+}
+
+function renderImage(stage, item) {
+  const img = document.createElement('img');
+  img.src = item.url;
+  img.alt = item.title;
+  stage.appendChild(img);
+}
+
+function renderVideo(stage, item) {
+  const v = document.createElement('video');
+  v.src = item.url;
+  v.autoplay = true;
+  v.playsInline = true;
+  v.muted = !!(S.settings && S.settings.muted);
+  v.addEventListener('ended', () => next(), { once: true });
+  v.addEventListener('error', () => setTimeout(next, 3000), { once: true });
+  stage.appendChild(v);
+  const p = v.play();
+  if (p && p.catch) p.catch(() => { v.muted = true; v.play().catch(() => {}); });
+}
+
+function ytId(url) {
+  if (/^[\w-]{11}$/.test(url)) return url;
+  let m = url.match(/[?&]v=([\w-]{11})/);
+  if (m) return m[1];
+  m = url.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|shorts\/|live\/))([\w-]{11})/);
+  return m ? m[1] : null;
+}
+
+function loadYtApi() {
+  if (S.ytApiPromise) return S.ytApiPromise;
+  S.ytApiPromise = new Promise(resolve => {
+    if (window.YT && window.YT.Player) return resolve();
+    window.onYouTubeIframeAPIReady = () => resolve();
+    const s = document.createElement('script');
+    s.src = 'https://www.youtube.com/iframe_api';
+    document.head.appendChild(s);
+  });
+  return S.ytApiPromise;
+}
+
+async function renderYouTube(stage, item) {
+  const vid = ytId(item.url);
+  if (!vid) { setTimeout(next, 3000); return; }
+
+  const holder = document.createElement('div');
+  holder.id = 'yt-' + Date.now();
+  stage.appendChild(holder);
+
+  await loadYtApi();
+  if (S.currentId !== item.id) return; // rotation moved on while API loaded
+
+  const muted = !!(S.settings && S.settings.muted);
+  S.yt = new YT.Player(holder.id, {
+    videoId: vid,
+    width: '100%', height: '100%',
+    playerVars: {
+      autoplay: 1, controls: 0, disablekb: 1, rel: 0,
+      modestbranding: 1, playsinline: 1, iv_load_policy: 3, fs: 0,
+      mute: muted ? 1 : 0
+    },
+    events: {
+      onReady: e => {
+        if (muted) e.target.mute();
+        e.target.playVideo();
+        // Browser blocked unmuted autoplay? Fall back to muted playback.
+        setTimeout(() => {
+          try {
+            if (S.yt && S.currentId === item.id &&
+                S.yt.getPlayerState() !== YT.PlayerState.PLAYING) {
+              S.yt.mute();
+              S.yt.playVideo();
+            }
+          } catch (_) {}
+        }, 4000);
+      },
+      onStateChange: e => {
+        if (e.data === YT.PlayerState.ENDED) { next(); return; }
+        // Once actual length is known, tighten the 30-min safety timer.
+        if (e.data === YT.PlayerState.PLAYING && item.duration === 0) {
+          try {
+            const d = e.target.getDuration();
+            if (d > 0) {
+              clearTimeout(S.safetyTimer);
+              S.safetyTimer = setTimeout(next, (d - e.target.getCurrentTime() + 20) * 1000);
+            }
+          } catch (_) {}
+        }
+      },
+      onError: () => setTimeout(next, 3000)
+    }
+  });
+}
+
+// ════════════════════════════════════════════════════════════
+// Idle screen + clocks
+// ════════════════════════════════════════════════════════════
+function showFallback(show) {
+  $('fallback').classList.toggle('hidden', !show);
+  if (show) { S.currentTitle = null; }
+  updateClockVisibility();
+}
+
+function fallbackVisible() {
+  return !$('fallback').classList.contains('hidden');
+}
+
+function startClocks() {
+  const tick = () => {
+    const now = new Date();
+    const hm = now.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
+    $('fbClock').textContent = hm;
+    $('fbDate').textContent = now.toLocaleDateString('he-IL', {
+      weekday: 'long', day: 'numeric', month: 'long', year: 'numeric'
+    });
+    $('clockPill').textContent = hm;
+  };
+  tick();
+  setInterval(tick, 1000);
+}
+
+function updateClockVisibility() {
+  const show = S.settings && S.settings.showClock && !fallbackVisible();
+  $('clockPill').classList.toggle('show', !!show);
+}
+
+// ════════════════════════════════════════════════════════════
+// Resilience
+// ════════════════════════════════════════════════════════════
+async function requestWakeLock() {
+  try {
+    if ('wakeLock' in navigator) S.wakeLock = await navigator.wakeLock.request('screen');
+  } catch (_) {}
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') requestWakeLock();
+});
+
+// Nightly reload keeps memory fresh on long-running kiosk browsers.
+function checkDailyReload() {
+  if (!S.settings || S.settings.dailyReloadHour < 0) return;
+  const now = new Date();
+  const day = now.toDateString();
+  if (now.getHours() === S.settings.dailyReloadHour &&
+      localStorage.getItem('kioskReloadDay') !== day) {
+    localStorage.setItem('kioskReloadDay', day);
+    location.reload();
+  }
+}
+
+// Manual skip for on-site testing (keyboard / remote).
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight' || e.key === 'ArrowLeft' || e.key === ' ') next();
+});
+</script>
+
+</body>
+</html>
