@@ -6,7 +6,7 @@ const CONFIG = {
 
     // ── Google Apps Script web-app URL ───────────────────────
     // Paste the URL from: Apps Script editor → Deploy → Manage deployments
-    SCRIPT_URL: 'PASTE_YOUR_DEPLOYED_SCRIPT_URL_HERE',
+    SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbyvbwOZEVuVCjwOGMkzfcm9mpEnYMSYGL2AQoV7xTHlEVrhi_wMy_F_n4mBjhlxZIrp/exec',
 
     // ── Direct link to the underlying Sheet (for "Open Sheet" buttons) ─
     SHEETS_URL: 'https://docs.google.com/spreadsheets/d/1sBuKpJyIpA_yZzQB0zIo9zQaM1Yb-ZZpE638tQRk3d4/edit',
