@@ -270,8 +270,8 @@ function stopCurrent() {
 }
 
 function armTimers(item) {
-  clearTimeout(S.advanceTimer);
-  clearTimeout(S.safetyTimer);
+  clearTimeout(S.advanceTimer); S.advanceTimer = null;
+  clearTimeout(S.safetyTimer);  S.safetyTimer = null;
   const def = (S.settings && S.settings.defaultDuration) || 60;
 
   if (item.type === 'website' || item.type === 'image') {
