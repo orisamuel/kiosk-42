@@ -124,7 +124,7 @@
 // How long to wait for an item to actually start before giving up on it.
 // The waiting screen is showing throughout, so this is never a black screen.
 const LOAD_TIMEOUT_MS   = 7000;
-const DRIVE_TRY_TIMEOUT = 4500;   // per Drive URL strategy
+const DRIVE_TRY_TIMEOUT = 3000;   // per Drive URL strategy
 const SINGLE_RETRY_MS   = 20000;  // lone broken item: retry instead of rotating
 
 // ════════════════════════════════════════════════════════════
@@ -293,16 +293,19 @@ function renderItem(item) {
     default:        renderWebsite(stage, item); break;
   }
 
-  // If it never starts, move on (or retry when it's the only item) rather than
-  // sitting on a dead item.
+  armLoadTimeout(item, LOAD_TIMEOUT_MS);
+  armTimers(item);
+}
+
+// If an item never starts, move on (or retry when it's the only one) instead of
+// sitting on it. Renderers that swap sources re-arm this for each attempt.
+function armLoadTimeout(item, ms) {
   clearTimeout(S.loadTimer);
   S.loadTimer = setTimeout(() => {
     if (S.currentId !== item.id || stageVisible()) return;
     if (S.items.length > 1) next();
     else { S.currentId = null; setTimeout(() => renderItem(item), SINGLE_RETRY_MS); }
-  }, LOAD_TIMEOUT_MS);
-
-  armTimers(item);
+  }, ms);
 }
 
 // Content is actually up — reveal it over the waiting screen.
@@ -468,12 +471,13 @@ function driveId(url) {
   return null;
 }
 
-// Drive videos must play by themselves — no tap on a play button. So we stream
-// the file into a <video> tag (autoplay + muted + loop all work there) instead
-// of embedding Drive's player, which requires a click.
-//   1. usercontent /download with confirm=t — also serves big, virus-scanned files
-//   2. the classic uc?export=download endpoint
-//   3. last resort: Drive's own embed (may need a tap; advances on a timer)
+// Drive videos should play by themselves — no tap on a play button — so we try
+// to stream the file into a <video> tag first (autoplay + muted + loop all work
+// there). Heads up: Google usually refuses to serve Drive video bytes to a page
+// on another domain, even for "anyone with the link" files, so these attempts
+// often fail and we end up on Drive's own embed, which may want a tap. A video
+// that must autoplay is safer hosted next to this player (see README) or on
+// YouTube. Each attempt is kept short so the waiting screen isn't held for long.
 function renderDrive(stage, item) {
   const id = driveId(item.url);
   if (!id) { setTimeout(next, 1500); return; }
@@ -492,6 +496,9 @@ function renderDrive(stage, item) {
     stage.innerHTML = '';
     const v = setupVideoEl(item, src, tryNextStrategy);
     stage.appendChild(v);
+    // Keep the item alive while we work through the strategies — the generic
+    // load timeout would otherwise skip it mid-chain.
+    armLoadTimeout(item, DRIVE_TRY_TIMEOUT * (strategies.length - attempt + 2));
     // Google answers some files with an HTML page instead of video bytes, and a
     // <video> stays silently black for that — no 'error' event. Poll instead.
     S.driveWatchdog = setTimeout(() => {
@@ -511,6 +518,7 @@ function renderDrive(stage, item) {
     f.src = 'https://drive.google.com/file/d/' + id + '/preview';
     stage.appendChild(f);
     if (fitFor(item) === 'cover') coverIframe(f);
+    armLoadTimeout(item, LOAD_TIMEOUT_MS);
     armTimers(item);
   };
 

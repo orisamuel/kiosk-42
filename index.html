@@ -446,7 +446,7 @@ function updateDurationHint() {
   if (type === 'website') {
     typeHint.textContent = 'שימו לב: חלק מהאתרים חוסמים הצגה בתוך מסך אחר — תרוץ בדיקה אוטומטית בשמירה.';
   } else if (type === 'drive') {
-    typeHint.textContent = 'הקובץ בדרייב חייב להיות משותף כ"כל מי שיש לו הקישור". לקבצים כבדים (מעל ~50MB) כדאי להגדיר גם משך תצוגה — ראו README.';
+    typeHint.textContent = '⚠ גוגל חוסמת הזרמת וידאו מדרייב לאתר אחר, ולכן סרטון כזה עלול לדרוש לחיצה על פליי במסך. לסרטון שחייב לרוץ לבד — העלו את הקובץ לתיקיית videos בריפו והשתמשו בסוג "קובץ וידאו" (ראו README).';
   } else {
     typeHint.textContent = '';
   }
