@@ -142,6 +142,14 @@
         <input class="form-input" id="setReloadHour" type="number" min="-1" max="23">
         <div class="hint">4 = ‏04:00 בלילה. ‏-1 לביטול</div>
       </div>
+      <div class="form-group full">
+        <label class="form-label">התאמת וידאו ותמונות למסך</label>
+        <select class="form-select" id="setVideoFit">
+          <option value="contain">שלם — רואים את כל התמונה (פסים שחורים בצדדים)</option>
+          <option value="cover">מלא מסך — התוכן ממלא את המסך (נחתך בקצוות)</option>
+        </select>
+        <div class="hint">רלוונטי במיוחד למסך אנכי שמציג סרטון רחב. אפשר לעקוף לכל פריט בנפרד.</div>
+      </div>
       <div class="form-group">
         <div class="check-row" style="margin-top: 26px;">
           <input type="checkbox" id="setMuted">
@@ -195,6 +203,14 @@
       <label class="form-label">משך תצוגה (שניות)</label>
       <input class="form-input" id="fDuration" type="number" min="0" placeholder="">
       <div class="hint" id="durationHint"></div>
+    </div>
+    <div class="form-group" id="fitGroup">
+      <label class="form-label">התאמה למסך</label>
+      <select class="form-select" id="fFit">
+        <option value="">לפי ההגדרה הכללית</option>
+        <option value="contain">שלם (פסים שחורים)</option>
+        <option value="cover">מלא מסך (נחתך)</option>
+      </select>
     </div>
 
     <div class="modal-footer">
@@ -274,7 +290,7 @@ function renderList() {
       </div>
       <div class="pl-url">${esc(it.url)}</div>
       <div class="pl-bottom">
-        <span class="pl-meta">${meta.label} · ${dur}</span>
+        <span class="pl-meta">${meta.label} · ${dur}${it.fit ? ' · ' + (it.fit === 'cover' ? 'מלא מסך' : 'שלם') : ''}</span>
         <button class="icon-btn" title="למעלה" onclick="move('${it.id}','up')" ${i === 0 ? 'disabled' : ''}>▲</button>
         <button class="icon-btn" title="למטה" onclick="move('${it.id}','down')" ${i === items.length - 1 ? 'disabled' : ''}>▼</button>
         <button class="icon-btn" title="${it.active ? 'השבתה' : 'הפעלה'}" onclick="toggleActive('${it.id}', ${it.active})">${it.active ? '⏸' : '▶'}</button>
@@ -337,6 +353,7 @@ function openAddModal() {
   document.getElementById('fType').value = 'website';
   document.getElementById('fDuration').value = '';
   document.getElementById('fLoop').checked = false;
+  document.getElementById('fFit').value = '';
   updateDurationHint();
   document.getElementById('itemModal').classList.add('open');
 }
@@ -351,6 +368,7 @@ function openEditModal(id) {
   document.getElementById('fType').value = it.type;
   document.getElementById('fDuration').value = it.duration || '';
   document.getElementById('fLoop').checked = !!it.loop;
+  document.getElementById('fFit').value = it.fit || '';
   updateDurationHint();
   document.getElementById('itemModal').classList.add('open');
 }
@@ -388,6 +406,8 @@ function updateDurationHint() {
   const typeHint = document.getElementById('typeHint');
   const isVideo = type === 'youtube' || type === 'video' || type === 'drive';
   document.getElementById('loopGroup').style.display = isVideo ? '' : 'none';
+  // Websites reflow to the screen, so the fit option is meaningless for them.
+  document.getElementById('fitGroup').style.display = type === 'website' ? 'none' : '';
   if (isVideo) {
     durHint.textContent = document.getElementById('fLoop').checked
       ? 'ריק או 0 = הסרטון רץ בלופ בלי סוף. מספר שניות = לופ למשך הזמן הזה ואז ממשיכים לפריט הבא.'
@@ -420,6 +440,7 @@ async function saveItem() {
   const duration = parseInt(document.getElementById('fDuration').value) || 0;
   const isVideo = type === 'youtube' || type === 'video' || type === 'drive';
   const loop = String(isVideo && document.getElementById('fLoop').checked);
+  const fit = type === 'website' ? '' : document.getElementById('fFit').value;
 
   if (!url || !title) return showToast('נא למלא כתובת ושם', 'warning');
   if (type === 'youtube' && !ytId(url)) return showToast('כתובת היוטיוב לא תקינה', 'warning');
@@ -429,8 +450,8 @@ async function saveItem() {
   btn.disabled = true;
   try {
     const res = editingId
-      ? await apiCall('updateItem', { id: editingId, title, type, url, duration, loop })
-      : await apiCall('addItem', { title, type, url, duration, loop });
+      ? await apiCall('updateItem', { id: editingId, title, type, url, duration, loop, fit })
+      : await apiCall('addItem', { title, type, url, duration, loop, fit });
     if (!res.success) return showToast(res.message, 'error');
     closeModal();
     showToast('נשמר ✓', 'success');
@@ -462,6 +483,7 @@ function fillSettings() {
   document.getElementById('setReloadHour').value = settings.dailyReloadHour;
   document.getElementById('setMuted').checked = settings.muted;
   document.getElementById('setClock').checked = settings.showClock;
+  document.getElementById('setVideoFit').value = settings.videoFit || 'contain';
 }
 
 async function saveSettings() {
@@ -474,7 +496,8 @@ async function saveSettings() {
       defaultDuration: document.getElementById('setDefault').value,
       dailyReloadHour: document.getElementById('setReloadHour').value,
       muted: String(document.getElementById('setMuted').checked),
-      showClock: String(document.getElementById('setClock').checked)
+      showClock: String(document.getElementById('setClock').checked),
+      videoFit: document.getElementById('setVideoFit').value
     });
     if (!res.success) return showToast(res.message, 'error');
     showToast('ההגדרות נשמרו — יחולו על המסך בבדיקת העדכונים הבאה', 'success');

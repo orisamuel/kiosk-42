@@ -79,15 +79,18 @@ function findRow(sheet, colIndex, value) {
 
 // ============================================================
 // TABLE: PLAYLIST
-// Schema: id(0), title(1), type(2), url(3), duration(4), active(5), order(6), created(7), loop(8)
+// Schema: id(0), title(1), type(2), url(3), duration(4), active(5), order(6), created(7),
+//         loop(8), fit(9)
 //   type:     youtube | video | drive | website | image
 //   duration: seconds. 0 = play to end (videos) / use defaultDuration (websites, images)
 //   active:   'כן' / 'לא'
 //   loop:     'כן' / 'לא' — videos only. loop+duration=0 → repeats forever;
 //             loop+duration>0 → repeats for that long, then next item.
+//   fit:      '' (use the global videoFit setting) | 'contain' | 'cover'
+//             Matters most on a portrait screen showing landscape video.
 // ============================================================
 
-const PLAYLIST_HEADERS = ['id', 'title', 'type', 'url', 'duration', 'active', 'order', 'created', 'loop'];
+const PLAYLIST_HEADERS = ['id', 'title', 'type', 'url', 'duration', 'active', 'order', 'created', 'loop', 'fit'];
 
 // Single call used by BOTH the kiosk player and the admin page.
 // Returns all items (admin needs inactive ones too — the player filters).
@@ -97,9 +100,12 @@ function getPlaylist(currentTitle) {
   try {
     const sheet = ensureSheet('playlist', PLAYLIST_HEADERS);
     const data = sheet.getDataRange().getValues();
-    // Migration: sheets created before the loop feature lack the 9th column.
+    // Migration: sheets created before the loop / fit features lack those columns.
     if (data.length && String(data[0][8] || '') !== 'loop') {
       sheet.getRange(1, 9).setValue('loop');
+    }
+    if (data.length && String(data[0][9] || '') !== 'fit') {
+      sheet.getRange(1, 10).setValue('fit');
     }
     const items = data.length <= 1 ? [] : data.slice(1)
       .map(r => ({
@@ -111,7 +117,8 @@ function getPlaylist(currentTitle) {
         active:   r[5] === 'כן' || r[5] === true || r[5] === 'yes',
         order:    parseFloat(r[6]) || 0,
         created:  normalizeDate(r[7]),
-        loop:     r[8] === 'כן' || r[8] === true || r[8] === 'yes'
+        loop:     r[8] === 'כן' || r[8] === true || r[8] === 'yes',
+        fit:      String(r[9] || '')
       }))
       .filter(it => it.id && it.url)
       .sort((a, b) => a.order - b.order);
@@ -147,7 +154,8 @@ function addItem(d) {
       'כן',
       maxOrder + 1,
       fmtDate(new Date()),
-      d.loop === 'true' || d.loop === true ? 'כן' : 'לא'
+      d.loop === 'true' || d.loop === true ? 'כן' : 'לא',
+      d.fit === 'contain' || d.fit === 'cover' ? d.fit : ''
     ]);
     return { success: true, message: 'נוסף לפלייליסט', id: id };
   } catch (e) {
@@ -167,6 +175,7 @@ function updateItem(d) {
     if (d.duration !== undefined) sheet.getRange(row, 5).setValue(parseInt(d.duration) || 0);
     if (d.active !== undefined)   sheet.getRange(row, 6).setValue(d.active === 'true' || d.active === true ? 'כן' : 'לא');
     if (d.loop !== undefined)     sheet.getRange(row, 9).setValue(d.loop === 'true' || d.loop === true ? 'כן' : 'לא');
+    if (d.fit !== undefined)      sheet.getRange(row, 10).setValue(d.fit === 'contain' || d.fit === 'cover' ? d.fit : '');
     return { success: true, message: 'עודכן' };
   } catch (e) {
     return { success: false, message: e.toString() };
@@ -227,7 +236,8 @@ const SETTINGS_DEFAULTS = {
   muted:           'כן',           // mute videos ('כן'/'לא') — unmuted needs kiosk-browser autoplay permission
   showClock:       'כן',           // clock overlay on the player
   dailyReloadHour: 4,              // full page reload hour (0-23), -1 to disable
-  reloadToken:     1               // bumped by refreshKiosk → player reloads
+  reloadToken:     1,              // bumped by refreshKiosk → player reloads
+  videoFit:        'contain'       // default fit for video/image: contain | cover
 };
 
 function getSettingsMap() {
@@ -249,7 +259,8 @@ function getSettingsMap() {
     muted:           map.muted === 'כן' || map.muted === true,
     showClock:       map.showClock === 'כן' || map.showClock === true,
     dailyReloadHour: isNaN(reloadHour) ? 4 : reloadHour,
-    reloadToken:     parseInt(map.reloadToken) || 1
+    reloadToken:     parseInt(map.reloadToken) || 1,
+    videoFit:        map.videoFit === 'cover' ? 'cover' : 'contain'
   };
 }
 
@@ -264,7 +275,8 @@ function updateSettings(p) {
     const sheet = ensureSheet('settings', ['key', 'value']);
     getSettingsMap(); // make sure default rows exist
     const boolKeys = ['muted', 'showClock'];
-    const allowed = ['kioskName', 'refreshSeconds', 'defaultDuration', 'muted', 'showClock', 'dailyReloadHour'];
+    const allowed = ['kioskName', 'refreshSeconds', 'defaultDuration', 'muted', 'showClock',
+                     'dailyReloadHour', 'videoFit'];
     allowed.forEach(k => {
       if (p[k] === undefined) return;
       let v = p[k];
@@ -372,12 +384,13 @@ function doPost(e) {
         return jsonResponse(getPlaylist(p.current));
       case 'addItem':
         return jsonResponse(addItem({
-          title: p.title, type: p.type, url: p.url, duration: p.duration, loop: p.loop
+          title: p.title, type: p.type, url: p.url, duration: p.duration,
+          loop: p.loop, fit: p.fit
         }));
       case 'updateItem':
         return jsonResponse(updateItem({
           id: p.id, title: p.title, type: p.type, url: p.url,
-          duration: p.duration, active: p.active, loop: p.loop
+          duration: p.duration, active: p.active, loop: p.loop, fit: p.fit
         }));
       case 'deleteItem':
         return jsonResponse(deleteItem(p.id));

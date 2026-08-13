@@ -33,6 +33,13 @@
     background: #000;
   }
   #stage video, #stage img { object-fit: contain; }
+  /* "cover" mode for embedded players (YouTube/Drive): the iframe keeps a 16:9
+     box and is scaled up until it covers the screen, so a portrait screen shows
+     a cropped full-bleed video instead of thick black bars. */
+  #stage iframe.cover {
+    inset: auto; top: 50%; left: 50%;
+    transform-origin: center center;
+  }
 
   /* ── Idle / fallback screen ── */
   #fallback {
@@ -45,17 +52,18 @@
     transition: opacity 0.5s ease;
   }
   #fallback.hidden { opacity: 0; pointer-events: none; }
+  /* vmin so the idle screen scales the same on landscape and portrait screens */
   #fbClock {
-    font-size: 14vw; font-weight: 800; line-height: 1;
+    font-size: 22vmin; font-weight: 800; line-height: 1;
     letter-spacing: 0.02em;
     color: #FBBF24;
     text-shadow: 0 0 80px rgba(245, 158, 11, 0.35);
     font-variant-numeric: tabular-nums;
     direction: ltr;
   }
-  #fbDate { font-size: 3vw; font-weight: 400; color: #94A3B8; margin-top: 2vh; }
-  #fbName { font-size: 2.2vw; font-weight: 600; color: #475569; margin-top: 5vh; }
-  #fbHint { font-size: 1.4vw; color: #475569; margin-top: 2vh; direction: rtl; }
+  #fbDate { font-size: 4.6vmin; font-weight: 400; color: #94A3B8; margin-top: 2vh; text-align: center; }
+  #fbName { font-size: 3.4vmin; font-weight: 600; color: #475569; margin-top: 5vh; text-align: center; }
+  #fbHint { font-size: 2.4vmin; color: #475569; margin-top: 2vh; direction: rtl; text-align: center; padding: 0 6vmin; }
 
   /* ── Clock overlay while content plays ── */
   #clockPill {
@@ -123,7 +131,9 @@ const S = {
   ytApiPromise: null,
   failStreak: 0,
   wakeLock: null,
-  driveFallback: false  // true once a Drive file had to use Drive's own player
+  driveFallback: false, // true once a Drive file had to use Drive's own player
+  driveWatchdog: null,
+  coverResize: null
 };
 
 const CACHE_KEY = 'kioskCache';
@@ -270,6 +280,8 @@ function renderItem(item) {
 function stopCurrent() {
   clearTimeout(S.advanceTimer);
   clearTimeout(S.safetyTimer);
+  clearTimeout(S.driveWatchdog);
+  if (S.coverResize) { window.removeEventListener('resize', S.coverResize); S.coverResize = null; }
   if (S.yt) { try { S.yt.destroy(); } catch (_) {} S.yt = null; }
 }
 
@@ -301,17 +313,45 @@ function armTimers(item) {
 // ════════════════════════════════════════════════════════════
 // Renderers
 // ════════════════════════════════════════════════════════════
+
+// Per-item override wins; otherwise the global setting; otherwise letterbox.
+function fitFor(item) {
+  if (item.fit === 'cover' || item.fit === 'contain') return item.fit;
+  return (S.settings && S.settings.videoFit === 'cover') ? 'cover' : 'contain';
+}
+
+// Size a 16:9 iframe so it covers the viewport, cropping the overflow.
+// Re-applied on resize/rotation.
+function coverIframe(f) {
+  f.classList.add('cover');
+  const apply = () => {
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const w = vw, h = vw * 9 / 16;
+    const scale = Math.max(1, vh / h);
+    f.style.width  = w + 'px';
+    f.style.height = h + 'px';
+    f.style.transform = 'translate(-50%, -50%) scale(' + scale + ')';
+  };
+  apply();
+  if (S.coverResize) window.removeEventListener('resize', S.coverResize);
+  S.coverResize = apply;
+  window.addEventListener('resize', apply);
+}
+
 function renderWebsite(stage, item) {
   const f = document.createElement('iframe');
   f.src = item.url;
   f.setAttribute('allow', 'autoplay; fullscreen; encrypted-media');
   stage.appendChild(f);
+  // Websites reflow to the viewport, so they are never scaled — a portrait
+  // screen simply gets the site's mobile layout.
 }
 
 function renderImage(stage, item) {
   const img = document.createElement('img');
   img.src = item.url;
   img.alt = item.title;
+  img.style.objectFit = fitFor(item);
   stage.appendChild(img);
 }
 
@@ -322,6 +362,7 @@ function renderVideo(stage, item) {
   v.playsInline = true;
   v.muted = !!(S.settings && S.settings.muted);
   v.loop = !!item.loop;
+  v.style.objectFit = fitFor(item);
   if (!item.loop) v.addEventListener('ended', () => next(), { once: true });
   v.addEventListener('error', () => setTimeout(next, 3000), { once: true });
   stage.appendChild(v);
@@ -346,26 +387,39 @@ function renderDrive(stage, item) {
   if (!id) { setTimeout(next, 3000); return; }
   S.driveFallback = false;
 
+  const useDrivePlayer = () => {
+    if (S.currentId !== item.id || S.driveFallback) return;
+    S.driveFallback = true;
+    clearTimeout(S.driveWatchdog);
+    stage.innerHTML = '';
+    const f = document.createElement('iframe');
+    f.src = 'https://drive.google.com/file/d/' + id + '/preview';
+    f.setAttribute('allow', 'autoplay; fullscreen');
+    stage.appendChild(f);
+    if (fitFor(item) === 'cover') coverIframe(f);
+    armTimers(item);
+  };
+
   const v = document.createElement('video');
   v.src = 'https://drive.google.com/uc?export=download&id=' + id;
   v.autoplay = true;
   v.playsInline = true;
   v.muted = !!(S.settings && S.settings.muted);
   v.loop = !!item.loop;
+  v.style.objectFit = fitFor(item);
   if (!item.loop) v.addEventListener('ended', () => next(), { once: true });
-  v.addEventListener('error', () => {
-    if (S.currentId !== item.id) return;
-    S.driveFallback = true;
-    stage.innerHTML = '';
-    const f = document.createElement('iframe');
-    f.src = 'https://drive.google.com/file/d/' + id + '/preview';
-    f.setAttribute('allow', 'autoplay; fullscreen');
-    stage.appendChild(f);
-    armTimers(item);
-  }, { once: true });
+  v.addEventListener('error', useDrivePlayer, { once: true });
   stage.appendChild(v);
   const p = v.play();
   if (p && p.catch) p.catch(() => { v.muted = true; v.play().catch(() => {}); });
+
+  // Google answers big files with an HTML scan page instead of the video, and a
+  // <video> tag stays silently black for that — no 'error' event. If nothing is
+  // actually playing after 12s, switch to Drive's own player.
+  clearTimeout(S.driveWatchdog);
+  S.driveWatchdog = setTimeout(() => {
+    if (v.readyState < 3 || v.currentTime === 0) useDrivePlayer();
+  }, 12000);
 }
 
 function ytId(url) {
@@ -398,6 +452,7 @@ async function renderYouTube(stage, item) {
 
   await loadYtApi();
   if (S.currentId !== item.id) return; // rotation moved on while API loaded
+  const wantCover = fitFor(item) === 'cover';
 
   const muted = !!(S.settings && S.settings.muted);
   const playerVars = {
@@ -417,6 +472,7 @@ async function renderYouTube(stage, item) {
     events: {
       onReady: e => {
         if (muted) e.target.mute();
+        if (wantCover) coverIframe(e.target.getIframe());
         e.target.playVideo();
         // Browser blocked unmuted autoplay? Fall back to muted playback.
         setTimeout(() => {
