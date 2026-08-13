@@ -282,8 +282,11 @@ function armTimers(item) {
     if (item.duration > 0) {
       S.advanceTimer = setTimeout(next, Math.max(5, item.duration) * 1000);
     }
-    // Whatever happens, never stay stuck on one item.
-    S.safetyTimer = setTimeout(next, 30 * 60 * 1000);
+    // Whatever happens, never stay stuck on one item —
+    // unless it loops forever on purpose (loop + no duration).
+    if (!(item.loop && item.duration === 0)) {
+      S.safetyTimer = setTimeout(next, 30 * 60 * 1000);
+    }
   }
 }
 
@@ -310,7 +313,8 @@ function renderVideo(stage, item) {
   v.autoplay = true;
   v.playsInline = true;
   v.muted = !!(S.settings && S.settings.muted);
-  v.addEventListener('ended', () => next(), { once: true });
+  v.loop = !!item.loop;
+  if (!item.loop) v.addEventListener('ended', () => next(), { once: true });
   v.addEventListener('error', () => setTimeout(next, 3000), { once: true });
   stage.appendChild(v);
   const p = v.play();
@@ -349,14 +353,20 @@ async function renderYouTube(stage, item) {
   if (S.currentId !== item.id) return; // rotation moved on while API loaded
 
   const muted = !!(S.settings && S.settings.muted);
+  const playerVars = {
+    autoplay: 1, controls: 0, disablekb: 1, rel: 0,
+    modestbranding: 1, playsinline: 1, iv_load_policy: 3, fs: 0,
+    mute: muted ? 1 : 0
+  };
+  if (item.loop) {
+    // YouTube loops only via a single-video "playlist" of itself.
+    playerVars.loop = 1;
+    playerVars.playlist = vid;
+  }
   S.yt = new YT.Player(holder.id, {
     videoId: vid,
     width: '100%', height: '100%',
-    playerVars: {
-      autoplay: 1, controls: 0, disablekb: 1, rel: 0,
-      modestbranding: 1, playsinline: 1, iv_load_policy: 3, fs: 0,
-      mute: muted ? 1 : 0
-    },
+    playerVars: playerVars,
     events: {
       onReady: e => {
         if (muted) e.target.mute();
@@ -375,7 +385,7 @@ async function renderYouTube(stage, item) {
       onStateChange: e => {
         if (e.data === YT.PlayerState.ENDED) { next(); return; }
         // Once actual length is known, tighten the 30-min safety timer.
-        if (e.data === YT.PlayerState.PLAYING && item.duration === 0) {
+        if (e.data === YT.PlayerState.PLAYING && item.duration === 0 && !item.loop) {
           try {
             const d = e.target.getDuration();
             if (d > 0) {

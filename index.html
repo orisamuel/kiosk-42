@@ -184,6 +184,12 @@
       </select>
       <div class="hint" id="typeHint"></div>
     </div>
+    <div class="form-group" id="loopGroup" style="display:none;">
+      <div class="check-row">
+        <input type="checkbox" id="fLoop" onchange="updateDurationHint()">
+        <label for="fLoop">🔁 ניגון בלופ (הסרטון חוזר על עצמו)</label>
+      </div>
+    </div>
     <div class="form-group">
       <label class="form-label">משך תצוגה (שניות)</label>
       <input class="form-input" id="fDuration" type="number" min="0" placeholder="">
@@ -278,6 +284,9 @@ function renderList() {
 }
 
 function durationLabel(it) {
+  if (it.loop && (it.type === 'youtube' || it.type === 'video')) {
+    return it.duration > 0 ? '🔁 לופ למשך ' + it.duration + ' שניות' : '🔁 לופ אינסופי';
+  }
   if (it.duration > 0) return it.duration + ' שניות';
   if (it.type === 'youtube' || it.type === 'video') return 'עד סוף הסרטון';
   return 'ברירת מחדל (' + (settings ? settings.defaultDuration : 60) + ' שניות)';
@@ -325,6 +334,7 @@ function openAddModal() {
   document.getElementById('fTitle').value = '';
   document.getElementById('fType').value = 'website';
   document.getElementById('fDuration').value = '';
+  document.getElementById('fLoop').checked = false;
   updateDurationHint();
   document.getElementById('itemModal').classList.add('open');
 }
@@ -338,6 +348,7 @@ function openEditModal(id) {
   document.getElementById('fTitle').value = it.title;
   document.getElementById('fType').value = it.type;
   document.getElementById('fDuration').value = it.duration || '';
+  document.getElementById('fLoop').checked = !!it.loop;
   updateDurationHint();
   document.getElementById('itemModal').classList.add('open');
 }
@@ -365,8 +376,12 @@ function updateDurationHint() {
   const type = document.getElementById('fType').value;
   const durHint = document.getElementById('durationHint');
   const typeHint = document.getElementById('typeHint');
-  if (type === 'youtube' || type === 'video') {
-    durHint.textContent = 'ריק או 0 = ניגון עד סוף הסרטון';
+  const isVideo = type === 'youtube' || type === 'video';
+  document.getElementById('loopGroup').style.display = isVideo ? '' : 'none';
+  if (isVideo) {
+    durHint.textContent = document.getElementById('fLoop').checked
+      ? 'ריק או 0 = הסרטון רץ בלופ בלי סוף. מספר שניות = לופ למשך הזמן הזה ואז ממשיכים לפריט הבא.'
+      : 'ריק או 0 = ניגון עד סוף הסרטון';
   } else {
     const def = settings ? settings.defaultDuration : 60;
     durHint.textContent = 'ריק = ברירת המחדל (' + def + ' שניות)';
@@ -389,6 +404,8 @@ async function saveItem() {
   const title = document.getElementById('fTitle').value.trim();
   const type = document.getElementById('fType').value;
   const duration = parseInt(document.getElementById('fDuration').value) || 0;
+  const isVideo = type === 'youtube' || type === 'video';
+  const loop = String(isVideo && document.getElementById('fLoop').checked);
 
   if (!url || !title) return showToast('נא למלא כתובת ושם', 'warning');
   if (type === 'youtube' && !ytId(url)) return showToast('כתובת היוטיוב לא תקינה', 'warning');
@@ -397,8 +414,8 @@ async function saveItem() {
   btn.disabled = true;
   try {
     const res = editingId
-      ? await apiCall('updateItem', { id: editingId, title, type, url, duration })
-      : await apiCall('addItem', { title, type, url, duration });
+      ? await apiCall('updateItem', { id: editingId, title, type, url, duration, loop })
+      : await apiCall('addItem', { title, type, url, duration, loop });
     if (!res.success) return showToast(res.message, 'error');
     closeModal();
     showToast('נשמר ✓', 'success');

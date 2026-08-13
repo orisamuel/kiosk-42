@@ -79,13 +79,15 @@ function findRow(sheet, colIndex, value) {
 
 // ============================================================
 // TABLE: PLAYLIST
-// Schema: id(0), title(1), type(2), url(3), duration(4), active(5), order(6), created(7)
+// Schema: id(0), title(1), type(2), url(3), duration(4), active(5), order(6), created(7), loop(8)
 //   type:     youtube | video | website | image
 //   duration: seconds. 0 = play to end (videos) / use defaultDuration (websites, images)
 //   active:   'כן' / 'לא'
+//   loop:     'כן' / 'לא' — videos only. loop+duration=0 → repeats forever;
+//             loop+duration>0 → repeats for that long, then next item.
 // ============================================================
 
-const PLAYLIST_HEADERS = ['id', 'title', 'type', 'url', 'duration', 'active', 'order', 'created'];
+const PLAYLIST_HEADERS = ['id', 'title', 'type', 'url', 'duration', 'active', 'order', 'created', 'loop'];
 
 // Single call used by BOTH the kiosk player and the admin page.
 // Returns all items (admin needs inactive ones too — the player filters).
@@ -95,6 +97,10 @@ function getPlaylist(currentTitle) {
   try {
     const sheet = ensureSheet('playlist', PLAYLIST_HEADERS);
     const data = sheet.getDataRange().getValues();
+    // Migration: sheets created before the loop feature lack the 9th column.
+    if (data.length && String(data[0][8] || '') !== 'loop') {
+      sheet.getRange(1, 9).setValue('loop');
+    }
     const items = data.length <= 1 ? [] : data.slice(1)
       .map(r => ({
         id:       String(r[0] || ''),
@@ -104,7 +110,8 @@ function getPlaylist(currentTitle) {
         duration: parseInt(r[4]) || 0,
         active:   r[5] === 'כן' || r[5] === true || r[5] === 'yes',
         order:    parseFloat(r[6]) || 0,
-        created:  normalizeDate(r[7])
+        created:  normalizeDate(r[7]),
+        loop:     r[8] === 'כן' || r[8] === true || r[8] === 'yes'
       }))
       .filter(it => it.id && it.url)
       .sort((a, b) => a.order - b.order);
@@ -139,7 +146,8 @@ function addItem(d) {
       parseInt(d.duration) || 0,
       'כן',
       maxOrder + 1,
-      fmtDate(new Date())
+      fmtDate(new Date()),
+      d.loop === 'true' || d.loop === true ? 'כן' : 'לא'
     ]);
     return { success: true, message: 'נוסף לפלייליסט', id: id };
   } catch (e) {
@@ -158,6 +166,7 @@ function updateItem(d) {
     if (d.url !== undefined)      sheet.getRange(row, 4).setValue(d.url);
     if (d.duration !== undefined) sheet.getRange(row, 5).setValue(parseInt(d.duration) || 0);
     if (d.active !== undefined)   sheet.getRange(row, 6).setValue(d.active === 'true' || d.active === true ? 'כן' : 'לא');
+    if (d.loop !== undefined)     sheet.getRange(row, 9).setValue(d.loop === 'true' || d.loop === true ? 'כן' : 'לא');
     return { success: true, message: 'עודכן' };
   } catch (e) {
     return { success: false, message: e.toString() };
@@ -363,12 +372,12 @@ function doPost(e) {
         return jsonResponse(getPlaylist(p.current));
       case 'addItem':
         return jsonResponse(addItem({
-          title: p.title, type: p.type, url: p.url, duration: p.duration
+          title: p.title, type: p.type, url: p.url, duration: p.duration, loop: p.loop
         }));
       case 'updateItem':
         return jsonResponse(updateItem({
           id: p.id, title: p.title, type: p.type, url: p.url,
-          duration: p.duration, active: p.active
+          duration: p.duration, active: p.active, loop: p.loop
         }));
       case 'deleteItem':
         return jsonResponse(deleteItem(p.id));
