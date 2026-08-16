@@ -112,7 +112,7 @@ function normalizeLoops(loopsCell, legacyLoopCell) {
 // Returns all items (admin needs inactive ones too — the player filters).
 // If `currentTitle` is passed (only the player passes it), records a
 // heartbeat in the script cache so the admin can see the screen is alive.
-function getPlaylist(currentTitle) {
+function getPlaylist(currentTitle, localFiles) {
   try {
     const sheet = ensureSheet('playlist', PLAYLIST_HEADERS);
     const data = sheet.getDataRange().getValues();
@@ -144,8 +144,12 @@ function getPlaylist(currentTitle) {
       .sort((a, b) => a.order - b.order);
 
     if (currentTitle) {
-      CacheService.getScriptCache().put('kioskHeartbeat',
-        JSON.stringify({ ts: Date.now(), item: String(currentTitle) }), 21600);
+      CacheService.getScriptCache().put('kioskHeartbeat', JSON.stringify({
+        ts: Date.now(),
+        item: String(currentTitle),
+        // Files stored on the screen itself, so the admin panel can offer them.
+        files: localFiles ? String(localFiles).split('|').filter(String) : []
+      }), 21600);
     }
 
     return { success: true, items: items, settings: getSettingsMap() };
@@ -345,7 +349,7 @@ function getStatus() {
     const raw = CacheService.getScriptCache().get('kioskHeartbeat');
     if (!raw) return { success: true, ts: null };
     const hb = JSON.parse(raw);
-    return { success: true, ts: hb.ts, item: hb.item };
+    return { success: true, ts: hb.ts, item: hb.item, files: hb.files || [] };
   } catch (e) {
     return { success: false, message: e.toString() };
   }
@@ -416,7 +420,7 @@ function doPost(e) {
 
       // ── Playlist ──────────────────────────────────────────
       case 'getPlaylist':
-        return jsonResponse(getPlaylist(p.current));
+        return jsonResponse(getPlaylist(p.current, p.files));
       case 'addItem':
         return jsonResponse(addItem({
           title: p.title, type: p.type, url: p.url, duration: p.duration,

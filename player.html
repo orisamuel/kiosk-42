@@ -101,6 +101,48 @@
 
   /* toasts are irrelevant on the kiosk screen */
   .toast-container { display: none !important; }
+
+  /* ── On-screen file manager ── */
+  #filesCorner {
+    position: fixed; top: 0; left: 0; width: 12vmin; height: 12vmin;
+    z-index: 40; cursor: none;
+  }
+  #files {
+    position: fixed; inset: 0; z-index: 50;
+    display: none; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.82); backdrop-filter: blur(6px);
+    direction: rtl; cursor: auto;
+  }
+  #files.open { display: flex; }
+  #filesBox {
+    width: min(92vw, 720px); max-height: 86vh; overflow-y: auto;
+    background: #161b24; border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 20px; padding: 3vmin; color: #F1F5F9;
+  }
+  #filesHead { display: flex; align-items: flex-start; justify-content: space-between; gap: 2vmin; }
+  #filesTitle { font-size: 3.4vmin; font-weight: 800; color: #FBBF24; }
+  #filesQuota { font-size: 2vmin; color: #94A3B8; margin-top: 0.5vmin; }
+  .fBtn {
+    background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14);
+    color: #F1F5F9; border-radius: 12px; padding: 1.4vmin 2.4vmin;
+    font-family: inherit; font-size: 2.2vmin; font-weight: 700;
+  }
+  .fPick {
+    display: block; margin-top: 3vmin; padding: 3vmin;
+    text-align: center; font-size: 2.8vmin; font-weight: 700;
+    color: #0d0f14; background: linear-gradient(135deg, #FBBF24, #D97706);
+    border-radius: 16px; cursor: pointer;
+  }
+  .fPick input { display: none; }
+  #filesStatus { margin-top: 2vmin; font-size: 2.2vmin; color: #FBBF24; min-height: 2.6vmin; }
+  .fRow {
+    display: flex; align-items: center; gap: 2vmin;
+    padding: 2vmin 0; border-bottom: 1px solid rgba(255,255,255,0.08);
+  }
+  .fName { flex: 1; min-width: 0; font-size: 2.4vmin; font-weight: 600;
+           overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fMeta { font-size: 2vmin; color: #94A3B8; }
+  .fEmpty { margin-top: 3vmin; font-size: 2.3vmin; color: #64748B; line-height: 1.6; }
 </style>
 </head>
 <body>
@@ -117,6 +159,30 @@
 
 <div id="clockPill">--:--</div>
 <div id="offlineDot"></div>
+
+<!-- ── On-screen file manager ──
+     Opened at the kiosk itself (5 taps in the top-left corner, the F key, or
+     ?files=1). Files picked here are copied into the device's own storage, so
+     they play with no network and no size limit. -->
+<div id="files">
+  <div id="filesBox">
+    <div id="filesHead">
+      <div>
+        <div id="filesTitle">קבצים על המסך</div>
+        <div id="filesQuota"></div>
+      </div>
+      <button class="fBtn" onclick="closeFiles()">סגירה ✕</button>
+    </div>
+    <label class="fPick">
+      <input type="file" id="filePicker" accept="video/*,image/*" multiple onchange="importFiles(this.files)">
+      ＋ בחירת קבצים מהמכשיר
+    </label>
+    <div id="filesStatus"></div>
+    <div id="filesList"></div>
+  </div>
+</div>
+
+<div id="filesCorner"></div>
 
 <script>
 'use strict';
@@ -148,8 +214,12 @@ const S = {
   failStreak: 0,
   wakeLock: null,
   driveWatchdog: null,
-  driveTimed: false,    // Drive fell back to its own player → advance on a timer
-  coverResize: null
+  timedAdvance: false,    // Drive fell back to its own player → advance on a timer
+  coverResize: null,
+  objectUrl: null,      // blob URL of the local file on screen (revoked on switch)
+  localNames: [],       // files stored on this device, reported in the heartbeat
+  filesOpen: false,
+  filesAutoClose: null
 };
 
 const CACHE_KEY = 'kioskCache';
@@ -176,15 +246,63 @@ const $ = id => document.getElementById(id);
   } catch (_) {}
 
   warmupServer();
-  poll();
+  refreshLocalNames().then(poll);
+
+  if (/[?&#]files/.test(location.href)) openFiles();
 })();
+
+// ════════════════════════════════════════════════════════════
+// Files stored on the kiosk itself
+// A file picked here is copied into the device's own storage (IndexedDB), so it
+// plays with no network, no upload and no size limit beyond the device's disk.
+// ════════════════════════════════════════════════════════════
+const DB_NAME = 'kioskFiles', DB_STORE = 'files';
+
+function idb() {
+  return new Promise((resolve, reject) => {
+    const r = indexedDB.open(DB_NAME, 1);
+    r.onupgradeneeded = () => {
+      if (!r.result.objectStoreNames.contains(DB_STORE)) {
+        r.result.createObjectStore(DB_STORE, { keyPath: 'name' });
+      }
+    };
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  });
+}
+
+function idbRun(mode, fn) {
+  return idb().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, mode);
+    const req = fn(tx.objectStore(DB_STORE));
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  }));
+}
+
+const filePut  = rec  => idbRun('readwrite', s => s.put(rec));
+const fileGet  = name => idbRun('readonly',  s => s.get(name));
+const fileDel  = name => idbRun('readwrite', s => s.delete(name));
+const fileList = ()   => idbRun('readonly',  s => s.getAll());
+
+async function refreshLocalNames() {
+  try {
+    const all = await fileList();
+    S.localNames = all.map(f => f.name);
+  } catch (_) { S.localNames = []; }
+}
 
 // ════════════════════════════════════════════════════════════
 // Polling — fetch playlist + report heartbeat
 // ════════════════════════════════════════════════════════════
 async function poll() {
   try {
-    const res = await apiCall('getPlaylist', { current: S.currentTitle || 'מסך המתנה' });
+    const res = await apiCall('getPlaylist', {
+      current: S.currentTitle || 'מסך המתנה',
+      // Tell the admin panel which files live on this screen, so items can be
+      // pointed at them from the phone.
+      files: S.localNames.slice(0, 25).join('|')
+    });
     // A non-JSON reply (Google error page during a redeploy) must never be
     // mistaken for an empty playlist — that would blank a working screen.
     if (res.success && Array.isArray(res.items)) {
@@ -278,7 +396,7 @@ function renderItem(item) {
   S.currentTitle = item.title;
   S.currentItemJson = JSON.stringify(item);
   S.playCount = 0;
-  S.driveTimed = false;
+  S.timedAdvance = false;
 
   // Hide the stage while the new item loads → the waiting screen shows through.
   showStage(false);
@@ -289,6 +407,7 @@ function renderItem(item) {
     case 'youtube': renderYouTube(stage, item); break;
     case 'video':   renderVideo(stage, item);   break;
     case 'drive':   renderDrive(stage, item);   break;
+    case 'local':   renderLocal(stage, item);   break;
     case 'image':   renderImage(stage, item);   break;
     default:        renderWebsite(stage, item); break;
   }
@@ -320,12 +439,14 @@ function stopCurrent() {
   clearTimeout(S.safetyTimer);   S.safetyTimer = null;
   clearTimeout(S.loadTimer);     S.loadTimer = null;
   clearTimeout(S.driveWatchdog); S.driveWatchdog = null;
+  if (S.objectUrl) { URL.revokeObjectURL(S.objectUrl); S.objectUrl = null; }
   if (S.coverResize) { window.removeEventListener('resize', S.coverResize); S.coverResize = null; }
   if (S.yt) { try { S.yt.destroy(); } catch (_) {} S.yt = null; }
 }
 
 function isVideoType(item) {
-  return item.type === 'youtube' || item.type === 'video' || item.type === 'drive';
+  return item.type === 'youtube' || item.type === 'video' ||
+         item.type === 'drive'   || item.type === 'local';
 }
 
 // 0 = play forever, N = play N times. Older cached items only have `loop`.
@@ -341,7 +462,7 @@ function armTimers(item) {
   const loops = loopsOf(item);
 
   // Timer-driven: anything that can't tell us when it finished.
-  if (!isVideoType(item) || S.driveTimed) {
+  if (!isVideoType(item) || S.timedAdvance) {
     const dur = item.duration > 0 ? item.duration : def;
     S.advanceTimer = setTimeout(next, Math.max(5, dur) * 1000);
     return;
@@ -462,6 +583,31 @@ function renderVideo(stage, item) {
   stage.appendChild(setupVideoEl(item, item.url, () => setTimeout(next, 1500)));
 }
 
+// A file sitting in this device's own storage. `url` holds the file name.
+async function renderLocal(stage, item) {
+  let rec = null;
+  try { rec = await fileGet(item.url); } catch (_) {}
+  if (S.currentId !== item.id) return;
+  if (!rec || !rec.blob) {
+    // The playlist points at a file this screen doesn't have — skip it and let
+    // the admin see the mismatch in the panel.
+    setTimeout(next, 1200);
+    return;
+  }
+  S.objectUrl = URL.createObjectURL(rec.blob);
+  if ((rec.type || '').indexOf('image/') === 0) {
+    const img = document.createElement('img');
+    img.style.objectFit = fitFor(item);
+    img.addEventListener('load', () => contentReady(item));
+    img.src = S.objectUrl;
+    stage.appendChild(img);
+    S.timedAdvance = true;  // images advance on a timer, like any still content
+    armTimers(item);
+  } else {
+    stage.appendChild(setupVideoEl(item, S.objectUrl, () => setTimeout(next, 1500)));
+  }
+}
+
 function driveId(url) {
   let m = url.match(/\/file\/d\/([\w-]{10,})/);
   if (m) return m[1];
@@ -509,7 +655,7 @@ function renderDrive(stage, item) {
 
   const useDriveEmbed = () => {
     if (S.currentId !== item.id) return;
-    S.driveTimed = true;   // no 'ended' from this player → run on a timer
+    S.timedAdvance = true;   // no 'ended' from this player → run on a timer
     stage.innerHTML = '';
     const f = document.createElement('iframe');
     f.setAttribute('allow', 'autoplay; fullscreen');
@@ -631,6 +777,124 @@ function updateClockVisibility() {
 }
 
 // ════════════════════════════════════════════════════════════
+// File manager UI (used at the kiosk itself)
+// ════════════════════════════════════════════════════════════
+function openFiles() {
+  S.filesOpen = true;
+  $('files').classList.add('open');
+  document.body.style.cursor = 'auto';
+  drawFiles();
+  // Never let the manager be left open on a public screen.
+  clearTimeout(S.filesAutoClose);
+  S.filesAutoClose = setTimeout(closeFiles, 3 * 60 * 1000);
+}
+
+function closeFiles() {
+  S.filesOpen = false;
+  $('files').classList.remove('open');
+  document.body.style.cursor = 'none';
+  clearTimeout(S.filesAutoClose);
+  $('filesStatus').textContent = '';
+}
+
+function fmtSize(b) {
+  if (b >= 1073741824) return (b / 1073741824).toFixed(1) + ' GB';
+  if (b >= 1048576)    return Math.round(b / 1048576) + ' MB';
+  return Math.max(1, Math.round(b / 1024)) + ' KB';
+}
+
+async function drawFiles() {
+  const list = $('filesList');
+  let all = [];
+  try { all = await fileList(); } catch (e) { list.textContent = 'שגיאת אחסון: ' + e; return; }
+
+  try {
+    if (navigator.storage && navigator.storage.estimate) {
+      const q = await navigator.storage.estimate();
+      $('filesQuota').textContent = 'בשימוש ' + fmtSize(q.usage || 0) +
+        ' מתוך ' + fmtSize(q.quota || 0) + ' זמינים במכשיר';
+    }
+  } catch (_) {}
+
+  if (!all.length) {
+    list.innerHTML = '<div class="fEmpty">אין עדיין קבצים על המסך הזה.<br>' +
+      'בוחרים קובץ מהמכשיר, והוא נשמר כאן ומתנגן גם בלי אינטרנט.<br>' +
+      'אחרי הבחירה הוא נוסף לפלייליסט אוטומטית.</div>';
+    return;
+  }
+  list.innerHTML = all.map(f => `
+    <div class="fRow">
+      <span class="fName">${(f.type || '').indexOf('image/') === 0 ? '🖼️' : '🎬'} ${escapeHtml(f.name)}</span>
+      <span class="fMeta">${fmtSize(f.size || 0)}</span>
+      <button class="fBtn" onclick="removeFile('${escapeHtml(f.name).replace(/'/g, "\\'")}')">מחיקה</button>
+    </div>`).join('');
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                  .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+async function importFiles(fileList_) {
+  const files = Array.from(fileList_ || []);
+  if (!files.length) return;
+  const status = $('filesStatus');
+
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    status.textContent = `שומר ${i + 1}/${files.length}: ${f.name} (${fmtSize(f.size)})...`;
+    try {
+      await filePut({ name: f.name, blob: f, size: f.size, type: f.type, added: Date.now() });
+    } catch (e) {
+      status.textContent = 'לא הצלחתי לשמור את ' + f.name + ' — ' + (e.name === 'QuotaExceededError'
+        ? 'אין מספיק מקום פנוי במכשיר' : e);
+      return;
+    }
+    // Register it in the playlist so it starts showing without a second step.
+    try {
+      const res = await apiCall('addItem', {
+        title: f.name.replace(/\.[^.]+$/, ''),
+        type: 'local',
+        url: f.name,
+        duration: 0,
+        loops: '1',
+        fit: ''
+      });
+      if (!res.success) status.textContent = 'נשמר, אבל ההוספה לפלייליסט נכשלה: ' + res.message;
+    } catch (e) {
+      status.textContent = 'הקובץ נשמר על המסך, אבל אין כרגע חיבור לשרת — הוסיפו אותו לפלייליסט מהנייד.';
+    }
+  }
+
+  await refreshLocalNames();
+  status.textContent = files.length + ' קבצים נשמרו ונוספו לפלייליסט ✓';
+  $('filePicker').value = '';
+  drawFiles();
+  // Ask the browser to keep these files instead of evicting them under pressure.
+  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (_) {}
+  poll();
+}
+
+async function removeFile(name) {
+  try { await fileDel(name); } catch (_) {}
+  await refreshLocalNames();
+  $('filesStatus').textContent = 'נמחק: ' + name + ' (אם הוא בפלייליסט — מחקו אותו גם מהנייד)';
+  drawFiles();
+  poll();
+}
+
+// Opening the manager on a touch screen: 5 taps in the top-left corner.
+(function cornerTaps() {
+  let taps = 0, timer = null;
+  $('filesCorner').addEventListener('pointerdown', () => {
+    taps++;
+    clearTimeout(timer);
+    timer = setTimeout(() => { taps = 0; }, 2500);
+    if (taps >= 5) { taps = 0; openFiles(); }
+  });
+})();
+
+// ════════════════════════════════════════════════════════════
 // Resilience
 // ════════════════════════════════════════════════════════════
 async function requestWakeLock() {
@@ -669,8 +933,14 @@ function checkDailyReload() {
   }
 }
 
-// Manual skip for on-site testing (keyboard / remote).
+// On-site controls (keyboard / remote): skip an item, or open the file manager.
 document.addEventListener('keydown', e => {
+  if (e.key === 'f' || e.key === 'F' || e.key === 'א') {
+    S.filesOpen ? closeFiles() : openFiles();
+    return;
+  }
+  if (e.key === 'Escape' && S.filesOpen) { closeFiles(); return; }
+  if (S.filesOpen) return;   // don't rotate content behind the manager
   if (e.key === 'ArrowRight' || e.key === 'ArrowLeft' || e.key === ' ') next();
 });
 </script>

@@ -179,9 +179,14 @@
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
 
-    <div class="form-group">
+    <div class="form-group" id="urlGroup">
       <label class="form-label">כתובת (URL)</label>
       <input class="form-input" id="fUrl" type="url" dir="ltr" placeholder="https://..." oninput="autoDetectType()">
+    </div>
+    <div class="form-group" id="localGroup" style="display:none;">
+      <label class="form-label">קובץ ששמור על המסך</label>
+      <select class="form-select" id="fLocal" onchange="onLocalPick()"></select>
+      <div class="hint" id="localHint"></div>
     </div>
     <div class="form-group">
       <label class="form-label">שם (לתצוגה ברשימה)</label>
@@ -192,6 +197,7 @@
       <select class="form-select" id="fType" onchange="updateDurationHint()">
         <option value="website">🌐 אתר</option>
         <option value="youtube">▶️ יוטיוב</option>
+        <option value="local">💾 קובץ ששמור על המסך</option>
         <option value="drive">📁 סרטון מגוגל דרייב</option>
         <option value="video">🎬 קובץ וידאו (mp4)</option>
         <option value="image">🖼️ תמונה</option>
@@ -243,9 +249,13 @@ const TYPE_META = {
   youtube: { emoji: '▶️', label: 'יוטיוב' },
   video:   { emoji: '🎬', label: 'וידאו' },
   drive:   { emoji: '📁', label: 'גוגל דרייב' },
+  local:   { emoji: '💾', label: 'קובץ על המסך' },
   website: { emoji: '🌐', label: 'אתר' },
   image:   { emoji: '🖼️', label: 'תמונה' }
 };
+
+// File names the kiosk reported in its last heartbeat.
+let kioskFiles = [];
 
 let items = [];
 let settings = null;
@@ -298,6 +308,8 @@ function renderList() {
         <span class="pl-emoji">${meta.emoji}</span>
         <span class="pl-title">${esc(it.title)}</span>
         ${it.active ? '' : '<span class="badge badge-off">מושבת</span>'}
+        ${it.type === 'local' && kioskFiles.length && kioskFiles.indexOf(it.url) === -1
+          ? '<span class="badge badge-off">הקובץ לא על המסך</span>' : ''}
       </div>
       <div class="pl-url">${esc(it.url)}</div>
       <div class="pl-bottom">
@@ -313,7 +325,7 @@ function renderList() {
 }
 
 function isVideoItem(type) {
-  return type === 'youtube' || type === 'video' || type === 'drive';
+  return type === 'youtube' || type === 'video' || type === 'drive' || type === 'local';
 }
 
 function loopsOf(it) {
@@ -437,6 +449,10 @@ function updateDurationHint() {
   document.getElementById('loopGroup').style.display = isVideo ? '' : 'none';
   // Websites reflow to the screen, so the fit option is meaningless for them.
   document.getElementById('fitGroup').style.display = type === 'website' ? 'none' : '';
+  // A file on the screen is chosen from a list, not typed as an address.
+  document.getElementById('localGroup').style.display = type === 'local' ? '' : 'none';
+  document.getElementById('urlGroup').style.display   = type === 'local' ? 'none' : '';
+  if (type === 'local') fillLocalPicker();
   if (isVideo) {
     durHint.textContent = 'ריק = לפי אורך הסרטון (מומלץ). מספר שניות = תקרה קשיחה, לשידור חי למשל.';
   } else {
@@ -450,6 +466,34 @@ function updateDurationHint() {
   } else {
     typeHint.textContent = '';
   }
+}
+
+// Files live on the kiosk, so the panel can only offer what the screen reported.
+function fillLocalPicker() {
+  const sel = document.getElementById('fLocal');
+  const hint = document.getElementById('localHint');
+  const chosen = document.getElementById('fUrl').value.trim();
+  const names = kioskFiles.slice();
+  if (chosen && names.indexOf(chosen) === -1) names.unshift(chosen);
+
+  if (!names.length) {
+    sel.innerHTML = '<option value="">— אין קבצים על המסך —</option>';
+    hint.innerHTML = 'כדי להוסיף קובץ: ניגשים למסך עצמו, מקישים 5 פעמים בפינה השמאלית העליונה ובוחרים קובץ. ' +
+                     'הוא נשמר על המסך ונוסף לפלייליסט אוטומטית — אין צורך להוסיף אותו כאן.';
+    return;
+  }
+  sel.innerHTML = names.map(n =>
+    `<option value="${esc(n)}"${n === chosen ? ' selected' : ''}>${esc(n)}${kioskFiles.indexOf(n) === -1 ? ' (לא נמצא על המסך)' : ''}</option>`
+  ).join('');
+  hint.textContent = 'הקובץ מתנגן מהזיכרון של המסך — בלי אינטרנט ובלי מגבלת גודל.';
+  onLocalPick();
+}
+
+function onLocalPick() {
+  const sel = document.getElementById('fLocal');
+  document.getElementById('fUrl').value = sel.value;
+  const title = document.getElementById('fTitle');
+  if (!title.value.trim() && sel.value) title.value = sel.value.replace(/\.[^.]+$/, '');
 }
 
 function ytId(url) {
@@ -469,7 +513,9 @@ async function saveItem() {
   const loops = isVideo ? document.getElementById('fLoops').value : '1';
   const fit = type === 'website' ? '' : document.getElementById('fFit').value;
 
-  if (!url || !title) return showToast('נא למלא כתובת ושם', 'warning');
+  if (!url || !title) {
+    return showToast(type === 'local' ? 'נא לבחור קובץ ולתת שם' : 'נא למלא כתובת ושם', 'warning');
+  }
   if (type === 'youtube' && !ytId(url)) return showToast('כתובת היוטיוב לא תקינה', 'warning');
   if (type === 'drive' && !driveId(url)) return showToast('לא זוהה קובץ בכתובת הדרייב — העתיקו את קישור השיתוף המלא', 'warning');
 
@@ -559,6 +605,13 @@ async function refreshStatus() {
   try {
     const res = await apiCall('getStatus');
     if (!res.success) throw new Error(res.message);
+    if (Array.isArray(res.files)) {
+      kioskFiles = res.files;
+      if (document.getElementById('fType').value === 'local' &&
+          document.getElementById('itemModal').classList.contains('open')) {
+        fillLocalPicker();
+      }
+    }
     if (!res.ts) {
       dot.className = 'status-dot';
       text.textContent = 'אין עדיין דיווח מהמסך — ודאו שהנגן פתוח על הקיוסק';
