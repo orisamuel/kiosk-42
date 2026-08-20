@@ -215,6 +215,8 @@ const S = {
   revealAt: 0,          // earliest moment the stage may be shown
   revealTimer: null,
   pending: null,        // { id, ready, start } for the item being brought up
+  playingSeen: false,   // did this item's video actually start rolling?
+  playWatchdog: null,
   pollTimer: null,
   yt: null,             // current YT.Player instance
   ytApiPromise: null,
@@ -420,6 +422,7 @@ function renderItem(item) {
   S.playCount = 0;
   S.timedAdvance = false;
   S.pending = { id: item.id, ready: false, start: null };
+  S.playingSeen = false;
 
   // Hide the stage while the new item loads → the waiting screen shows through.
   showStage(false);
@@ -476,10 +479,20 @@ function tryReveal(item) {
   if (start) { try { start(); } catch (_) {} }
   showStage(true);
   setTimeout(preloadNext, 1200);
+
+  // A player that loaded but refuses to roll (blocked autoplay, dead stream)
+  // must not hold the screen. Give it a few seconds, then move on.
+  if (isVideoType(item)) {
+    clearTimeout(S.playWatchdog);
+    S.playWatchdog = setTimeout(() => {
+      if (S.currentId === item.id && !S.playingSeen) next();
+    }, 10000);
+  }
 }
 
 function stopCurrent() {
   clearTimeout(S.revealTimer);   S.revealTimer = null;
+  clearTimeout(S.playWatchdog);  S.playWatchdog = null;
   clearTimeout(S.advanceTimer);  S.advanceTimer = null;
   clearTimeout(S.safetyTimer);   S.safetyTimer = null;
   clearTimeout(S.loadTimer);     S.loadTimer = null;
@@ -611,7 +624,7 @@ function makeVideoEl(item, src, onFail, start) {
   v.src = src;
 
   v.addEventListener('canplay', () => markReady(item, () => startVideo(v)));
-  v.addEventListener('playing', () => markReady(item));
+  v.addEventListener('playing', () => { S.playingSeen = true; markReady(item); });
   v.addEventListener('loadedmetadata', () => tuneSafety(item, v.duration, 0));
   if (!v.loop) {
     v.addEventListener('ended', () => onVideoEnded(item, () => {
@@ -862,6 +875,7 @@ async function renderYouTube(stage, item) {
           return;
         }
         if (e.data === YT.PlayerState.PLAYING) {
+          S.playingSeen = true;
           markReady(item);
           try { tuneSafety(item, e.target.getDuration(), e.target.getCurrentTime()); } catch (_) {}
         }
