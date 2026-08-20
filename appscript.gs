@@ -275,6 +275,7 @@ const SETTINGS_DEFAULTS = {
   dailyReloadHour: 4,              // full page reload hour (0-23), -1 to disable
   reloadToken:     1,              // bumped by refreshKiosk → player reloads
   videoFit:        'cover',        // default fit for video/image: contain | cover
+  gapSeconds:      10,             // waiting screen shown between items
   idleMessage:     'שטח פרסום זה יכול להיות שלך'  // shown on the waiting screen
 };
 
@@ -299,6 +300,7 @@ function getSettingsMap() {
     dailyReloadHour: isNaN(reloadHour) ? 4 : reloadHour,
     reloadToken:     parseInt(map.reloadToken) || 1,
     videoFit:        map.videoFit === 'contain' ? 'contain' : 'cover',
+    gapSeconds:      Math.min(120, Math.max(0, isNaN(parseInt(map.gapSeconds)) ? 10 : parseInt(map.gapSeconds))),
     idleMessage:     map.idleMessage === undefined ? '' : String(map.idleMessage)
   };
 }
@@ -315,7 +317,7 @@ function updateSettings(p) {
     getSettingsMap(); // make sure default rows exist
     const boolKeys = ['muted', 'showClock'];
     const allowed = ['kioskName', 'refreshSeconds', 'defaultDuration', 'muted', 'showClock',
-                     'dailyReloadHour', 'videoFit', 'idleMessage'];
+                     'dailyReloadHour', 'videoFit', 'idleMessage', 'gapSeconds'];
     allowed.forEach(k => {
       if (p[k] === undefined) return;
       let v = p[k];

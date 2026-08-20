@@ -138,6 +138,11 @@
         <div class="hint">כל כמה זמן המסך בודק אם הפלייליסט השתנה</div>
       </div>
       <div class="form-group">
+        <label class="form-label">מסך המתנה בין פריטים (שניות)</label>
+        <input class="form-input" id="setGap" type="number" min="0" max="120" step="1">
+        <div class="hint">כמה זמן להציג את מסך ההמתנה בין פריט לפריט. ‏0 = מעבר ישיר</div>
+      </div>
+      <div class="form-group">
         <label class="form-label">משך ברירת מחדל (שניות)</label>
         <input class="form-input" id="setDefault" type="number" min="5" step="5">
         <div class="hint">לאתרים ותמונות בלי משך מוגדר</div>
@@ -558,6 +563,7 @@ function fillSettings() {
   document.getElementById('setClock').checked = settings.showClock;
   document.getElementById('setVideoFit').value = settings.videoFit || 'cover';
   document.getElementById('setIdleMessage').value = settings.idleMessage || '';
+  document.getElementById('setGap').value = settings.gapSeconds === undefined ? 10 : settings.gapSeconds;
 }
 
 async function saveSettings() {
@@ -572,7 +578,8 @@ async function saveSettings() {
       muted: String(document.getElementById('setMuted').checked),
       showClock: String(document.getElementById('setClock').checked),
       videoFit: document.getElementById('setVideoFit').value,
-      idleMessage: document.getElementById('setIdleMessage').value.trim()
+      idleMessage: document.getElementById('setIdleMessage').value.trim(),
+      gapSeconds: document.getElementById('setGap').value
     });
     if (!res.success) return showToast(res.message, 'error');
     showToast('ההגדרות נשמרו — יחולו על המסך בבדיקת העדכונים הבאה', 'success');

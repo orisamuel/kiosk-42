@@ -105,12 +105,10 @@
   .toast-container { display: none !important; }
 
   /* ── On-screen file manager ── */
-  #filesCorner, #fsCorner {
-    position: fixed; top: 0; width: 12vmin; height: 12vmin;
+  #filesCorner {
+    position: fixed; top: 0; left: 0; width: 12vmin; height: 12vmin;
     z-index: 40; cursor: none;
   }
-  #filesCorner { left: 0; }
-  #fsCorner    { right: 0; }
   #files {
     position: fixed; inset: 0; z-index: 50;
     display: none; align-items: center; justify-content: center;
@@ -175,10 +173,7 @@
         <div id="filesTitle">קבצים על המסך</div>
         <div id="filesQuota"></div>
       </div>
-      <div style="display:flex; gap:1.5vmin; flex-wrap:wrap; justify-content:flex-end;">
-        <button class="fBtn" id="fsBtn" onclick="toggleFullscreen()">מסך מלא</button>
-        <button class="fBtn" onclick="closeFiles()">סגירה ✕</button>
-      </div>
+      <button class="fBtn" onclick="closeFiles()">סגירה ✕</button>
     </div>
     <label class="fPick">
       <input type="file" id="filePicker" accept="video/*,image/*" multiple onchange="importFiles(this.files)">
@@ -190,7 +185,6 @@
 </div>
 
 <div id="filesCorner"></div>
-<div id="fsCorner"></div>
 
 <script>
 'use strict';
@@ -227,6 +221,7 @@ const S = {
   coverResize: null,
   objectUrl: null,      // blob URL of the local file on screen (revoked on switch)
   localNames: [],       // files stored on this device, reported in the heartbeat
+  gapTimer: null,       // deliberate waiting-screen pause between items
   filesOpen: false,
   filesAutoClose: null,
   preload: null         // { id, el|img, blobUrl } — next item, warmed in advance
@@ -398,7 +393,29 @@ function next() {
     armTimers(item);
     return;
   }
+
+  // Deliberate breather on the waiting screen between items. Skipped when
+  // nothing was playing yet (boot) or when a single item owns the screen.
+  const gap = gapMs();
+  if (gap > 0 && prevId && S.items.length > 1) { gapThenRender(item, gap); return; }
+
   renderItem(item);
+}
+
+function gapMs() {
+  const sec = S.settings ? S.settings.gapSeconds : 10;
+  return Math.max(0, (typeof sec === 'number' ? sec : 10)) * 1000;
+}
+
+// Show the waiting screen for a moment, warming the upcoming item meanwhile.
+function gapThenRender(item, gap) {
+  stopCurrent();
+  $('stage').innerHTML = '';
+  showStage(false);
+  S.currentId = null;
+  S.currentTitle = null;      // the heartbeat reports the waiting screen
+  preloadItem(item);
+  S.gapTimer = setTimeout(() => renderItem(item), gap);
 }
 
 function renderItem(item) {
@@ -448,6 +465,7 @@ function contentReady(item) {
 }
 
 function stopCurrent() {
+  clearTimeout(S.gapTimer);      S.gapTimer = null;
   clearTimeout(S.advanceTimer);  S.advanceTimer = null;
   clearTimeout(S.safetyTimer);   S.safetyTimer = null;
   clearTimeout(S.loadTimer);     S.loadTimer = null;
@@ -611,7 +629,10 @@ function startVideo(v) {
 // and the waiting screen shows for less time.
 function preloadNext() {
   if (S.items.length < 2) return;
-  const item = S.items[(S.idx + 1) % S.items.length];
+  preloadItem(S.items[(S.idx + 1) % S.items.length]);
+}
+
+function preloadItem(item) {
   if (!item || (S.preload && S.preload.id === item.id)) return;
   dropPreload();
 
@@ -879,7 +900,6 @@ function openFiles() {
   $('files').classList.add('open');
   document.body.style.cursor = 'auto';
   drawFiles();
-  updateFsButton();
   // Never let the manager be left open on a public screen.
   clearTimeout(S.filesAutoClose);
   S.filesAutoClose = setTimeout(closeFiles, 3 * 60 * 1000);
@@ -991,7 +1011,6 @@ function cornerTaps(id, action) {
   });
 }
 cornerTaps('filesCorner', openFiles);
-cornerTaps('fsCorner', toggleFullscreen);
 
 // ════════════════════════════════════════════════════════════
 // Resilience
@@ -1028,20 +1047,21 @@ function leaveFullscreen() {
 function toggleFullscreen() {
   if (fsOn()) { userLeftFullscreen = true; leaveFullscreen(); }
   else { userLeftFullscreen = false; enterFullscreen(); }
-  setTimeout(updateFsButton, 300);
-}
-
-function updateFsButton() {
-  const b = document.getElementById('fsBtn');
-  if (b) b.textContent = fsOn() ? 'יציאה ממסך מלא' : 'מסך מלא';
 }
 
 function goFullscreen() {
+  // Kiosk browsers usually grant this on load; a normal browser will refuse
+  // until it sees a gesture, which the double tap below provides.
   enterFullscreen();
-  const onGesture = () => { if (!fsOn() && !userLeftFullscreen) enterFullscreen(); };
-  ['pointerdown', 'keydown', 'touchstart'].forEach(ev =>
-    document.addEventListener(ev, onGesture, { passive: true }));
-  document.addEventListener('fullscreenchange', updateFsButton);
+
+  // Double tap anywhere toggles fullscreen — in and out, same gesture.
+  let lastTap = 0;
+  document.addEventListener('pointerdown', e => {
+    if (S.filesOpen) return;                    // the manager has its own buttons
+    const now = e.timeStamp || Date.now();
+    if (now - lastTap < 450) { lastTap = 0; toggleFullscreen(); }
+    else lastTap = now;
+  }, { passive: true });
 }
 
 // Nightly reload keeps memory fresh on long-running kiosk browsers.
