@@ -711,13 +711,16 @@ function renderNotice(stage, item) {
   body.textContent = item.text || '';
   inner.appendChild(body);
 
-  const foot = document.createElement('div');
-  foot.className = 'foot';
-  foot.textContent = (S.settings && S.settings.kioskName) || '';
-
   box.appendChild(band);
   box.appendChild(inner);
-  box.appendChild(foot);
+  // Only take up room for a footer when there is a name to show.
+  const footText = (S.settings && S.settings.kioskName) || '';
+  if (footText) {
+    const foot = document.createElement('div');
+    foot.className = 'foot';
+    foot.textContent = footText;
+    box.appendChild(foot);
+  }
   stage.appendChild(box);
   S.timedAdvance = true;
   markReady(item);
