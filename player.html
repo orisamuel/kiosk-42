@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#000000">
 <title>הקיוסק של 42 — נגן</title>
+<link rel="preconnect" href="https://www.youtube.com" crossorigin>
+<link rel="preconnect" href="https://i.ytimg.com" crossorigin>
 <script src="config.js"></script>
 <script src="utils.js"></script>
 <style>
@@ -103,10 +105,12 @@
   .toast-container { display: none !important; }
 
   /* ── On-screen file manager ── */
-  #filesCorner {
-    position: fixed; top: 0; left: 0; width: 12vmin; height: 12vmin;
+  #filesCorner, #fsCorner {
+    position: fixed; top: 0; width: 12vmin; height: 12vmin;
     z-index: 40; cursor: none;
   }
+  #filesCorner { left: 0; }
+  #fsCorner    { right: 0; }
   #files {
     position: fixed; inset: 0; z-index: 50;
     display: none; align-items: center; justify-content: center;
@@ -171,7 +175,10 @@
         <div id="filesTitle">קבצים על המסך</div>
         <div id="filesQuota"></div>
       </div>
-      <button class="fBtn" onclick="closeFiles()">סגירה ✕</button>
+      <div style="display:flex; gap:1.5vmin; flex-wrap:wrap; justify-content:flex-end;">
+        <button class="fBtn" id="fsBtn" onclick="toggleFullscreen()">מסך מלא</button>
+        <button class="fBtn" onclick="closeFiles()">סגירה ✕</button>
+      </div>
     </div>
     <label class="fPick">
       <input type="file" id="filePicker" accept="video/*,image/*" multiple onchange="importFiles(this.files)">
@@ -183,6 +190,7 @@
 </div>
 
 <div id="filesCorner"></div>
+<div id="fsCorner"></div>
 
 <script>
 'use strict';
@@ -192,6 +200,7 @@
 const LOAD_TIMEOUT_MS   = 7000;
 const DRIVE_TRY_TIMEOUT = 3000;   // per Drive URL strategy
 const SINGLE_RETRY_MS   = 20000;  // lone broken item: retry instead of rotating
+const MAX_NATIVE_PX     = 2560;   // largest player width we ask the device to render
 
 // ════════════════════════════════════════════════════════════
 // State
@@ -219,7 +228,8 @@ const S = {
   objectUrl: null,      // blob URL of the local file on screen (revoked on switch)
   localNames: [],       // files stored on this device, reported in the heartbeat
   filesOpen: false,
-  filesAutoClose: null
+  filesAutoClose: null,
+  preload: null         // { id, el|img, blobUrl } — next item, warmed in advance
 };
 
 const CACHE_KEY = 'kioskCache';
@@ -360,6 +370,7 @@ function applyData(res, fromCache) {
 
   const oldCurrentId = S.currentId;
   S.items = active;
+  dropPreload();   // the queue changed, so a warmed item may no longer be next
   const newIdx = oldCurrentId ? active.findIndex(i => i.id === oldCurrentId) : -1;
 
   if (newIdx !== -1) {
@@ -432,6 +443,8 @@ function contentReady(item) {
   if (S.currentId !== item.id) return;
   clearTimeout(S.loadTimer);
   showStage(true);
+  // Now that this item is up, start warming the next one.
+  setTimeout(preloadNext, 1200);
 }
 
 function stopCurrent() {
@@ -508,16 +521,23 @@ function fitFor(item) {
 }
 
 // Size a 16:9 iframe so it covers the viewport, cropping the overflow.
+// YouTube picks its stream from the player's OWN size, so a small iframe blown
+// up with a CSS scale looks soft. We therefore hand the iframe close to its real
+// covered size in CSS pixels, and only fall back to scaling above MAX_NATIVE_PX
+// so a weak streamer isn't asked to composite an enormous surface.
 // Re-applied on resize/rotation.
 function coverIframe(f) {
   f.classList.add('cover');
   const apply = () => {
     const vw = window.innerWidth, vh = window.innerHeight;
-    const w = vw, h = vw * 9 / 16;
-    const scale = Math.max(1, vh / h);
-    f.style.width  = w + 'px';
-    f.style.height = h + 'px';
-    f.style.transform = 'translate(-50%, -50%) scale(' + scale + ')';
+    let w = vw, h = vw * 9 / 16;
+    if (h < vh) { h = vh; w = vh * 16 / 9; }   // portrait screen: cover by height
+    const shrink = w > MAX_NATIVE_PX ? MAX_NATIVE_PX / w : 1;
+    f.style.width  = Math.round(w * shrink) + 'px';
+    f.style.height = Math.round(h * shrink) + 'px';
+    f.style.transform = shrink === 1
+      ? 'translate(-50%, -50%)'
+      : 'translate(-50%, -50%) scale(' + (1 / shrink) + ')';
   };
   apply();
   if (S.coverResize) window.removeEventListener('resize', S.coverResize);
@@ -546,18 +566,17 @@ function renderImage(stage, item) {
   stage.appendChild(img);
 }
 
-// Shared setup for a <video> element: autoplay muted (the only way browsers
-// allow unattended playback), reveal on first frame, count loops.
-function setupVideoEl(item, src, onFail) {
+// Build a <video> for an item. `start` false only buffers it (used to warm the
+// next item up in the background) — nothing plays until startVideo() is called.
+function makeVideoEl(item, src, onFail, start) {
   const v = document.createElement('video');
-  v.src = src;
-  v.autoplay = true;
+  v.preload = 'auto';
   v.playsInline = true;
   v.setAttribute('playsinline', '');
-  v.setAttribute('autoplay', '');
   v.muted = !!(S.settings && S.settings.muted);
   v.loop = loopsOf(item) === 0;
   v.style.objectFit = fitFor(item);
+  v.src = src;
 
   v.addEventListener('playing', () => contentReady(item));
   v.addEventListener('loadedmetadata', () => tuneSafety(item, v.duration, 0));
@@ -567,20 +586,77 @@ function setupVideoEl(item, src, onFail) {
       v.play().catch(() => {});
     }));
   }
-  v.addEventListener('error', onFail, { once: true });
+  if (onFail) v.addEventListener('error', onFail, { once: true });
 
+  if (start) startVideo(v);
+  return v;
+}
+
+// Autoplay muted is the only form browsers allow unattended; if an unmuted
+// attempt is blocked we retry muted rather than sit on a frozen frame.
+function startVideo(v) {
+  v.autoplay = true;
+  v.setAttribute('autoplay', '');
   const tryPlay = () => {
     const p = v.play();
-    // Unmuted autoplay is blocked unless the kiosk browser allows it — retry muted.
     if (p && p.catch) p.catch(() => { v.muted = true; v.play().catch(() => {}); });
   };
   tryPlay();
   v.addEventListener('canplay', tryPlay, { once: true });
-  return v;
+}
+
+// ── Warming the next item ──
+// Called once the current item is on screen: the following item's video starts
+// buffering (or its image downloads) in the background, so the switch is short
+// and the waiting screen shows for less time.
+function preloadNext() {
+  if (S.items.length < 2) return;
+  const item = S.items[(S.idx + 1) % S.items.length];
+  if (!item || (S.preload && S.preload.id === item.id)) return;
+  dropPreload();
+
+  if (item.type === 'image') {
+    const img = new Image();
+    img.src = item.url;
+    S.preload = { id: item.id, img: img };
+  } else if (item.type === 'video') {
+    S.preload = { id: item.id, el: makeVideoEl(item, item.url, null, false) };
+  } else if (item.type === 'local') {
+    fileGet(item.url).then(rec => {
+      if (!rec || !rec.blob || (S.preload && S.preload.id === item.id)) return;
+      const url = URL.createObjectURL(rec.blob);
+      S.preload = { id: item.id, el: makeVideoEl(item, url, null, false), blobUrl: url };
+    }).catch(() => {});
+  }
+  // YouTube and websites can't be warmed without a second live player, so they
+  // rely on the preconnect hints instead.
+}
+
+function dropPreload() {
+  if (!S.preload) return;
+  if (S.preload.el) { try { S.preload.el.removeAttribute('src'); S.preload.el.load(); } catch (_) {} }
+  if (S.preload.blobUrl) URL.revokeObjectURL(S.preload.blobUrl);
+  S.preload = null;
+}
+
+// Hand over the warmed element for this item, if we have one.
+function takePreloaded(item) {
+  if (S.preload && S.preload.id === item.id && S.preload.el) {
+    const taken = S.preload;
+    S.preload = null;
+    return taken;
+  }
+  return null;
 }
 
 function renderVideo(stage, item) {
-  stage.appendChild(setupVideoEl(item, item.url, () => setTimeout(next, 1500)));
+  const warm = takePreloaded(item);
+  if (warm) {
+    stage.appendChild(warm.el);
+    startVideo(warm.el);
+    return;
+  }
+  stage.appendChild(makeVideoEl(item, item.url, () => setTimeout(next, 1500), true));
 }
 
 // A file sitting in this device's own storage. `url` holds the file name.
@@ -594,6 +670,13 @@ async function renderLocal(stage, item) {
     setTimeout(next, 1200);
     return;
   }
+  const warm = takePreloaded(item);
+  if (warm && (rec.type || '').indexOf('image/') !== 0) {
+    S.objectUrl = warm.blobUrl;
+    stage.appendChild(warm.el);
+    startVideo(warm.el);
+    return;
+  }
   S.objectUrl = URL.createObjectURL(rec.blob);
   if ((rec.type || '').indexOf('image/') === 0) {
     const img = document.createElement('img');
@@ -604,7 +687,7 @@ async function renderLocal(stage, item) {
     S.timedAdvance = true;  // images advance on a timer, like any still content
     armTimers(item);
   } else {
-    stage.appendChild(setupVideoEl(item, S.objectUrl, () => setTimeout(next, 1500)));
+    stage.appendChild(makeVideoEl(item, S.objectUrl, () => setTimeout(next, 1500), true));
   }
 }
 
@@ -640,7 +723,7 @@ function renderDrive(stage, item) {
     if (attempt >= strategies.length) { useDriveEmbed(); return; }
     const src = strategies[attempt++];
     stage.innerHTML = '';
-    const v = setupVideoEl(item, src, tryNextStrategy);
+    const v = makeVideoEl(item, src, tryNextStrategy, true);
     stage.appendChild(v);
     // Keep the item alive while we work through the strategies — the generic
     // load timeout would otherwise skip it mid-chain.
@@ -691,6 +774,16 @@ function loadYtApi() {
   return S.ytApiPromise;
 }
 
+// YouTube treats quality as a hint, not a command: it still decides from the
+// player size and the network. We ask for the best level it reports anyway.
+function pickBestQuality(player) {
+  try {
+    const levels = player.getAvailableQualityLevels();
+    if (levels && levels.length) player.setPlaybackQuality(levels[0]);
+    else player.setPlaybackQuality('highres');
+  } catch (_) {}
+}
+
 async function renderYouTube(stage, item) {
   const vid = ytId(item.url);
   if (!vid) { setTimeout(next, 1500); return; }
@@ -710,7 +803,7 @@ async function renderYouTube(stage, item) {
     playerVars: {
       autoplay: 1, controls: 0, disablekb: 1, rel: 0,
       modestbranding: 1, playsinline: 1, iv_load_policy: 3, fs: 0,
-      mute: muted ? 1 : 0
+      mute: muted ? 1 : 0, vq: 'hd1080'
       // No loop/playlist vars: repeats are counted on the ENDED event so that
       // "play N times" and "forever" share one code path.
     },
@@ -718,6 +811,7 @@ async function renderYouTube(stage, item) {
       onReady: e => {
         if (muted) e.target.mute();
         if (wantCover) coverIframe(e.target.getIframe());
+        pickBestQuality(e.target);
         e.target.playVideo();
         // Blocked unmuted autoplay? Fall back to muted playback.
         setTimeout(() => {
@@ -737,6 +831,7 @@ async function renderYouTube(stage, item) {
         }
         if (e.data === YT.PlayerState.PLAYING) {
           contentReady(item);
+          pickBestQuality(e.target);   // levels are only known once playing
           try { tuneSafety(item, e.target.getDuration(), e.target.getCurrentTime()); } catch (_) {}
         }
       },
@@ -784,6 +879,7 @@ function openFiles() {
   $('files').classList.add('open');
   document.body.style.cursor = 'auto';
   drawFiles();
+  updateFsButton();
   // Never let the manager be left open on a public screen.
   clearTimeout(S.filesAutoClose);
   S.filesAutoClose = setTimeout(closeFiles, 3 * 60 * 1000);
@@ -883,16 +979,19 @@ async function removeFile(name) {
   poll();
 }
 
-// Opening the manager on a touch screen: 5 taps in the top-left corner.
-(function cornerTaps() {
+// Hidden touch targets: 5 taps top-left opens the file manager, 5 taps
+// top-right toggles fullscreen. Nothing is visible on the screen itself.
+function cornerTaps(id, action) {
   let taps = 0, timer = null;
-  $('filesCorner').addEventListener('pointerdown', () => {
+  $(id).addEventListener('pointerdown', () => {
     taps++;
     clearTimeout(timer);
     timer = setTimeout(() => { taps = 0; }, 2500);
-    if (taps >= 5) { taps = 0; openFiles(); }
+    if (taps >= 5) { taps = 0; action(); }
   });
-})();
+}
+cornerTaps('filesCorner', openFiles);
+cornerTaps('fsCorner', toggleFullscreen);
 
 // ════════════════════════════════════════════════════════════
 // Resilience
@@ -906,19 +1005,43 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') requestWakeLock();
 });
 
-// Browsers only grant fullscreen from a user gesture, so try immediately (works
-// in kiosk browsers that allow it) and again on the first touch of the screen.
-function goFullscreen() {
+// Fullscreen. Browsers only grant it from a user gesture, so we try on load
+// (kiosk browsers usually allow it) and again on the first touch — but never
+// after someone deliberately left it, otherwise there'd be no way out.
+let userLeftFullscreen = false;
+
+function fsOn() {
+  return !!(document.fullscreenElement || document.webkitFullscreenElement);
+}
+
+function enterFullscreen() {
   const el = document.documentElement;
   const req = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen;
-  if (!req) return;
-  const attempt = () => { try { req.call(el); } catch (_) {} };
-  attempt();
-  const onGesture = () => {
-    if (!document.fullscreenElement) attempt();
-  };
+  if (req) { try { req.call(el); } catch (_) {} }
+}
+
+function leaveFullscreen() {
+  const ex = document.exitFullscreen || document.webkitExitFullscreen;
+  if (ex) { try { ex.call(document); } catch (_) {} }
+}
+
+function toggleFullscreen() {
+  if (fsOn()) { userLeftFullscreen = true; leaveFullscreen(); }
+  else { userLeftFullscreen = false; enterFullscreen(); }
+  setTimeout(updateFsButton, 300);
+}
+
+function updateFsButton() {
+  const b = document.getElementById('fsBtn');
+  if (b) b.textContent = fsOn() ? 'יציאה ממסך מלא' : 'מסך מלא';
+}
+
+function goFullscreen() {
+  enterFullscreen();
+  const onGesture = () => { if (!fsOn() && !userLeftFullscreen) enterFullscreen(); };
   ['pointerdown', 'keydown', 'touchstart'].forEach(ev =>
     document.addEventListener(ev, onGesture, { passive: true }));
+  document.addEventListener('fullscreenchange', updateFsButton);
 }
 
 // Nightly reload keeps memory fresh on long-running kiosk browsers.
@@ -940,6 +1063,7 @@ document.addEventListener('keydown', e => {
     return;
   }
   if (e.key === 'Escape' && S.filesOpen) { closeFiles(); return; }
+  if (e.key === 'x' || e.key === 'X') { toggleFullscreen(); return; }
   if (S.filesOpen) return;   // don't rotate content behind the manager
   if (e.key === 'ArrowRight' || e.key === 'ArrowLeft' || e.key === ' ') next();
 });
