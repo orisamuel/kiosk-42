@@ -212,6 +212,9 @@ const S = {
   advanceTimer: null,
   safetyTimer: null,
   loadTimer: null,
+  revealAt: 0,          // earliest moment the stage may be shown
+  revealTimer: null,
+  pending: null,        // { id, ready, start } for the item being brought up
   pollTimer: null,
   yt: null,             // current YT.Player instance
   ytApiPromise: null,
@@ -222,10 +225,10 @@ const S = {
   coverResize: null,
   objectUrl: null,      // blob URL of the local file on screen (revoked on switch)
   localNames: [],       // files stored on this device, reported in the heartbeat
-  gapTimer: null,       // deliberate waiting-screen pause between items
   filesOpen: false,
   filesAutoClose: null,
-  preload: null         // { id, el|img, blobUrl } — next item, warmed in advance
+  preload: null,        // { id, el|img, blobUrl } — next item, warmed in advance
+  bootId: String(Date.now()) + '-' + Math.random().toString(36).slice(2, 7)
 };
 
 const CACHE_KEY = 'kioskCache';
@@ -307,7 +310,8 @@ async function poll() {
       current: S.currentTitle || 'מסך המתנה',
       // Tell the admin panel which files live on this screen, so items can be
       // pointed at them from the phone.
-      files: S.localNames.slice(0, 25).join('|')
+      files: S.localNames.slice(0, 25).join('|'),
+      boot: S.bootId
     });
     // A non-JSON reply (Google error page during a redeploy) must never be
     // mistaken for an empty playlist — that would blank a working screen.
@@ -395,28 +399,17 @@ function next() {
     return;
   }
 
-  // Deliberate breather on the waiting screen between items. Skipped when
-  // nothing was playing yet (boot) or when a single item owns the screen.
-  const gap = gapMs();
-  if (gap > 0 && prevId && S.items.length > 1) { gapThenRender(item, gap); return; }
-
+  // Deliberate breather on the waiting screen between items — the next item
+  // loads during it, in the background, and is revealed when it ends. Skipped
+  // when nothing was playing yet (boot) or a single item owns the screen.
+  const gap = (prevId && S.items.length > 1) ? gapMs() : 0;
+  S.revealAt = gap > 0 ? Date.now() + gap : 0;
   renderItem(item);
 }
 
 function gapMs() {
   const sec = S.settings ? S.settings.gapSeconds : 10;
   return Math.max(0, (typeof sec === 'number' ? sec : 10)) * 1000;
-}
-
-// Show the waiting screen for a moment, warming the upcoming item meanwhile.
-function gapThenRender(item, gap) {
-  stopCurrent();
-  $('stage').innerHTML = '';
-  showStage(false);
-  S.currentId = null;
-  S.currentTitle = null;      // the heartbeat reports the waiting screen
-  preloadItem(item);
-  S.gapTimer = setTimeout(() => renderItem(item), gap);
 }
 
 function renderItem(item) {
@@ -426,6 +419,7 @@ function renderItem(item) {
   S.currentItemJson = JSON.stringify(item);
   S.playCount = 0;
   S.timedAdvance = false;
+  S.pending = { id: item.id, ready: false, start: null };
 
   // Hide the stage while the new item loads → the waiting screen shows through.
   showStage(false);
@@ -450,23 +444,42 @@ function renderItem(item) {
 function armLoadTimeout(item, ms) {
   clearTimeout(S.loadTimer);
   S.loadTimer = setTimeout(() => {
-    if (S.currentId !== item.id || stageVisible()) return;
+    if (S.currentId !== item.id) return;
+    if (S.pending && S.pending.id === item.id && S.pending.ready) return;
     if (S.items.length > 1) next();
     else { S.currentId = null; setTimeout(() => renderItem(item), SINGLE_RETRY_MS); }
   }, ms);
 }
 
-// Content is actually up — reveal it over the waiting screen.
-function contentReady(item) {
+// An item finished loading. `start` (optional) begins playback and is only
+// called at reveal time, so a video prepared during the pause still starts from
+// its first frame rather than part-way through.
+function markReady(item, start) {
   if (S.currentId !== item.id) return;
   clearTimeout(S.loadTimer);
+  if (!S.pending || S.pending.id !== item.id) S.pending = { id: item.id, ready: false, start: null };
+  S.pending.ready = true;
+  if (start) S.pending.start = start;
+  tryReveal(item);
+}
+
+function tryReveal(item) {
+  if (!S.pending || S.pending.id !== item.id || !S.pending.ready) return;
+  const wait = S.revealAt - Date.now();
+  if (wait > 0) {
+    clearTimeout(S.revealTimer);
+    S.revealTimer = setTimeout(() => tryReveal(item), wait);
+    return;
+  }
+  const start = S.pending.start;
+  S.pending.start = null;
+  if (start) { try { start(); } catch (_) {} }
   showStage(true);
-  // Now that this item is up, start warming the next one.
   setTimeout(preloadNext, 1200);
 }
 
 function stopCurrent() {
-  clearTimeout(S.gapTimer);      S.gapTimer = null;
+  clearTimeout(S.revealTimer);   S.revealTimer = null;
   clearTimeout(S.advanceTimer);  S.advanceTimer = null;
   clearTimeout(S.safetyTimer);   S.safetyTimer = null;
   clearTimeout(S.loadTimer);     S.loadTimer = null;
@@ -568,7 +581,7 @@ function renderWebsite(stage, item) {
   const f = document.createElement('iframe');
   f.setAttribute('allow', 'autoplay; fullscreen; encrypted-media');
   f.setAttribute('allowfullscreen', '');
-  f.addEventListener('load', () => contentReady(item));
+  f.addEventListener('load', () => markReady(item));
   f.src = item.url;
   stage.appendChild(f);
   // Websites reflow to the viewport, so they are never scaled — a portrait
@@ -579,7 +592,7 @@ function renderImage(stage, item) {
   const img = document.createElement('img');
   img.alt = item.title;
   img.style.objectFit = fitFor(item);
-  img.addEventListener('load', () => contentReady(item));
+  img.addEventListener('load', () => markReady(item));
   img.addEventListener('error', () => setTimeout(next, 1500), { once: true });
   img.src = item.url;
   stage.appendChild(img);
@@ -597,7 +610,8 @@ function makeVideoEl(item, src, onFail, start) {
   v.style.objectFit = fitFor(item);
   v.src = src;
 
-  v.addEventListener('playing', () => contentReady(item));
+  v.addEventListener('canplay', () => markReady(item, () => startVideo(v)));
+  v.addEventListener('playing', () => markReady(item));
   v.addEventListener('loadedmetadata', () => tuneSafety(item, v.duration, 0));
   if (!v.loop) {
     v.addEventListener('ended', () => onVideoEnded(item, () => {
@@ -607,7 +621,7 @@ function makeVideoEl(item, src, onFail, start) {
   }
   if (onFail) v.addEventListener('error', onFail, { once: true });
 
-  if (start) startVideo(v);
+  if (start && v.readyState >= 3) startVideo(v);   // already buffered: go now
   return v;
 }
 
@@ -703,7 +717,7 @@ async function renderLocal(stage, item) {
   if ((rec.type || '').indexOf('image/') === 0) {
     const img = document.createElement('img');
     img.style.objectFit = fitFor(item);
-    img.addEventListener('load', () => contentReady(item));
+    img.addEventListener('load', () => markReady(item));
     img.src = S.objectUrl;
     stage.appendChild(img);
     S.timedAdvance = true;  // images advance on a timer, like any still content
@@ -765,7 +779,7 @@ function renderDrive(stage, item) {
     const f = document.createElement('iframe');
     f.setAttribute('allow', 'autoplay; fullscreen');
     f.setAttribute('allowfullscreen', '');
-    f.addEventListener('load', () => contentReady(item));
+    f.addEventListener('load', () => markReady(item));
     f.src = 'https://drive.google.com/file/d/' + id + '/preview';
     stage.appendChild(f);
     if (fitFor(item) === 'cover') coverIframe(f);
@@ -796,16 +810,6 @@ function loadYtApi() {
   return S.ytApiPromise;
 }
 
-// YouTube treats quality as a hint, not a command: it still decides from the
-// player size and the network. We ask for the best level it reports anyway.
-function pickBestQuality(player) {
-  try {
-    const levels = player.getAvailableQualityLevels();
-    if (levels && levels.length) player.setPlaybackQuality(levels[0]);
-    else player.setPlaybackQuality('highres');
-  } catch (_) {}
-}
-
 async function renderYouTube(stage, item) {
   const vid = ytId(item.url);
   if (!vid) { setTimeout(next, 1500); return; }
@@ -819,13 +823,16 @@ async function renderYouTube(stage, item) {
   const wantCover = fitFor(item) === 'cover';
   const muted = !!(S.settings && S.settings.muted);
 
+  // Autoplay is left off when the item is being prepared behind the waiting
+  // screen — playVideo() runs at reveal so the video starts from its opening.
+  const delayed = S.revealAt > Date.now();
   S.yt = new YT.Player(holder.id, {
     videoId: vid,
     width: '100%', height: '100%',
     playerVars: {
-      autoplay: 1, controls: 0, disablekb: 1, rel: 0,
+      autoplay: delayed ? 0 : 1, controls: 0, disablekb: 1, rel: 0,
       modestbranding: 1, playsinline: 1, iv_load_policy: 3, fs: 0,
-      mute: muted ? 1 : 0, vq: 'hd1080'
+      mute: muted ? 1 : 0
       // No loop/playlist vars: repeats are counted on the ENDED event so that
       // "play N times" and "forever" share one code path.
     },
@@ -833,18 +840,21 @@ async function renderYouTube(stage, item) {
       onReady: e => {
         if (muted) e.target.mute();
         if (wantCover) coverIframe(e.target.getIframe());
-        pickBestQuality(e.target);
-        e.target.playVideo();
-        // Blocked unmuted autoplay? Fall back to muted playback.
-        setTimeout(() => {
-          try {
-            if (S.yt && S.currentId === item.id &&
-                S.yt.getPlayerState() !== YT.PlayerState.PLAYING) {
-              S.yt.mute();
-              S.yt.playVideo();
-            }
-          } catch (_) {}
-        }, 2500);
+        // The player shell is up: that counts as loaded. Pressing play is the
+        // reveal step, so the pause doesn't eat the start of the video.
+        markReady(item, () => {
+          try { e.target.playVideo(); } catch (_) {}
+          // Blocked unmuted autoplay? Fall back to muted playback.
+          setTimeout(() => {
+            try {
+              if (S.yt && S.currentId === item.id &&
+                  S.yt.getPlayerState() !== YT.PlayerState.PLAYING) {
+                S.yt.mute();
+                S.yt.playVideo();
+              }
+            } catch (_) {}
+          }, 2500);
+        });
       },
       onStateChange: e => {
         if (e.data === YT.PlayerState.ENDED) {
@@ -852,8 +862,7 @@ async function renderYouTube(stage, item) {
           return;
         }
         if (e.data === YT.PlayerState.PLAYING) {
-          contentReady(item);
-          pickBestQuality(e.target);   // levels are only known once playing
+          markReady(item);
           try { tuneSafety(item, e.target.getDuration(), e.target.getCurrentTime()); } catch (_) {}
         }
       },

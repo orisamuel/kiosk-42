@@ -593,15 +593,40 @@ async function saveSettings() {
 
 // ── Kiosk status & control ─────────────────────────────────
 
+// The screen only learns about a refresh on its next check-in, so rather than
+// claim success straight away we watch for it to actually come back up.
 async function refreshKiosk() {
   const btn = document.getElementById('refreshBtn');
+  const label = btn.textContent;
   btn.disabled = true;
   try {
+    let bootBefore = '';
+    try { bootBefore = (await apiCall('getStatus')).boot || ''; } catch (_) {}
+
     const res = await apiCall('refreshKiosk');
-    showToast(res.success ? res.message : res.message, res.success ? 'success' : 'error');
+    if (!res.success) return showToast(res.message, 'error');
+
+    const every = (settings && settings.refreshSeconds) || 60;
+    showToast('נשלחה בקשת ריענון — המסך יגיב בבדיקה הבאה שלו (עד ' + every + ' שניות)', 'info', 6000);
+
+    // Poll until the screen reports a new page load, up to its check-in window.
+    const deadline = Date.now() + (every + 25) * 1000;
+    while (Date.now() < deadline) {
+      btn.textContent = '⏳ ממתין למסך...';
+      await new Promise(r => setTimeout(r, 5000));
+      let st = null;
+      try { st = await apiCall('getStatus'); } catch (_) { continue; }
+      if (st && st.boot && st.boot !== bootBefore) {
+        showToast('המסך התרענן ✓', 'success');
+        await loadAll();
+        return;
+      }
+    }
+    showToast('המסך עוד לא דיווח על ריענון — ייתכן שהנגן סגור או שאין לו רשת', 'warning', 8000);
   } catch (e) {
     showToast(e.message, 'error');
   } finally {
+    btn.textContent = label;
     btn.disabled = false;
   }
 }
