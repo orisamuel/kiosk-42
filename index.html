@@ -188,6 +188,11 @@
       <label class="form-label">כתובת (URL)</label>
       <input class="form-input" id="fUrl" type="url" dir="ltr" placeholder="https://..." oninput="autoDetectType()">
     </div>
+    <div class="form-group" id="textGroup" style="display:none;">
+      <label class="form-label" id="textLabel">הטקסט</label>
+      <textarea class="form-textarea" id="fText" rows="5" placeholder="הטקסט שיוצג על המסך..."></textarea>
+      <div class="hint" id="textHint"></div>
+    </div>
     <div class="form-group" id="localGroup" style="display:none;">
       <label class="form-label">קובץ ששמור על המסך</label>
       <select class="form-select" id="fLocal" onchange="onLocalPick()"></select>
@@ -200,6 +205,8 @@
     <div class="form-group">
       <label class="form-label">סוג</label>
       <select class="form-select" id="fType" onchange="updateDurationHint()">
+        <option value="notice">📢 הודעה למשרד</option>
+        <option value="slide">📝 שקופית טקסט</option>
         <option value="website">🌐 אתר</option>
         <option value="youtube">▶️ יוטיוב</option>
         <option value="local">💾 קובץ ששמור על המסך</option>
@@ -254,6 +261,8 @@ const TYPE_META = {
   youtube: { emoji: '▶️', label: 'יוטיוב' },
   video:   { emoji: '🎬', label: 'וידאו' },
   drive:   { emoji: '📁', label: 'גוגל דרייב' },
+  slide:   { emoji: '📝', label: 'שקופית' },
+  notice:  { emoji: '📢', label: 'הודעה' },
   local:   { emoji: '💾', label: 'קובץ על המסך' },
   website: { emoji: '🌐', label: 'אתר' },
   image:   { emoji: '🖼️', label: 'תמונה' }
@@ -316,7 +325,9 @@ function renderList() {
         ${it.type === 'local' && kioskFiles.length && kioskFiles.indexOf(it.url) === -1
           ? '<span class="badge badge-off">הקובץ לא על המסך</span>' : ''}
       </div>
-      <div class="pl-url">${esc(it.url)}</div>
+      <div class="pl-url"${isTextItem(it.type) ? ' style="direction:rtl; text-align:right;"' : ''}>${esc(
+        isTextItem(it.type) ? (it.text || '').replace(/\s+/g, ' ').slice(0, 90) : it.url
+      )}</div>
       <div class="pl-bottom">
         <span class="pl-meta">${meta.label} · ${dur}${it.fit ? ' · ' + (it.fit === 'cover' ? 'מלא מסך' : 'שלם') : ''}</span>
         <button class="icon-btn" title="למעלה" onclick="move('${it.id}','up')" ${i === 0 ? 'disabled' : ''}>▲</button>
@@ -327,6 +338,11 @@ function renderList() {
       </div>
     </div>`;
   }).join('');
+}
+
+// Types the screen draws from text — no address involved.
+function isTextItem(type) {
+  return type === 'slide' || type === 'notice';
 }
 
 function isVideoItem(type) {
@@ -394,6 +410,7 @@ function openAddModal() {
   document.getElementById('fDuration').value = '';
   document.getElementById('fLoops').value = '1';
   document.getElementById('fFit').value = '';
+  document.getElementById('fText').value = '';
   updateDurationHint();
   document.getElementById('itemModal').classList.add('open');
 }
@@ -415,6 +432,7 @@ function openEditModal(id) {
   }
   loopsSel.value = loops;
   document.getElementById('fFit').value = it.fit || '';
+  document.getElementById('fText').value = it.text || '';
   updateDurationHint();
   document.getElementById('itemModal').classList.add('open');
 }
@@ -453,11 +471,20 @@ function updateDurationHint() {
   const isVideo = isVideoItem(type);
   document.getElementById('loopGroup').style.display = isVideo ? '' : 'none';
   // Websites reflow to the screen, so the fit option is meaningless for them.
-  document.getElementById('fitGroup').style.display = type === 'website' ? 'none' : '';
+  document.getElementById('fitGroup').style.display =
+    (type === 'website' || isTextItem(type)) ? 'none' : '';
   // A file on the screen is chosen from a list, not typed as an address.
+  const isText = isTextItem(type);
   document.getElementById('localGroup').style.display = type === 'local' ? '' : 'none';
-  document.getElementById('urlGroup').style.display   = type === 'local' ? 'none' : '';
+  document.getElementById('textGroup').style.display  = isText ? '' : 'none';
+  document.getElementById('urlGroup').style.display   = (type === 'local' || isText) ? 'none' : '';
   if (type === 'local') fillLocalPicker();
+  if (isText) {
+    document.getElementById('textLabel').textContent = type === 'notice' ? 'תוכן ההודעה' : 'הטקסט';
+    document.getElementById('textHint').textContent = type === 'notice'
+      ? 'השם שלמעלה יופיע ככותרת ההודעה על המסך. הטקסט כאן הוא גוף ההודעה.'
+      : 'הטקסט יוצג במרכז המסך. גודל האותיות מותאם אוטומטית לאורך.';
+  }
   if (isVideo) {
     durHint.textContent = 'ריק = לפי אורך הסרטון (מומלץ). מספר שניות = תקרה קשיחה, לשידור חי למשל.';
   } else {
@@ -515,10 +542,14 @@ async function saveItem() {
   const type = document.getElementById('fType').value;
   const duration = parseInt(document.getElementById('fDuration').value) || 0;
   const isVideo = isVideoItem(type);
+  const isText = isTextItem(type);
   const loops = isVideo ? document.getElementById('fLoops').value : '1';
-  const fit = type === 'website' ? '' : document.getElementById('fFit').value;
+  const fit = (type === 'website' || isText) ? '' : document.getElementById('fFit').value;
+  const text = isText ? document.getElementById('fText').value.trim() : '';
 
-  if (!url || !title) {
+  if (isText) {
+    if (!title || !text) return showToast('נא למלא שם וטקסט', 'warning');
+  } else if (!url || !title) {
     return showToast(type === 'local' ? 'נא לבחור קובץ ולתת שם' : 'נא למלא כתובת ושם', 'warning');
   }
   if (type === 'youtube' && !ytId(url)) return showToast('כתובת היוטיוב לא תקינה', 'warning');
@@ -528,8 +559,8 @@ async function saveItem() {
   btn.disabled = true;
   try {
     const res = editingId
-      ? await apiCall('updateItem', { id: editingId, title, type, url, duration, loops, fit })
-      : await apiCall('addItem', { title, type, url, duration, loops, fit });
+      ? await apiCall('updateItem', { id: editingId, title, type, url, duration, loops, fit, text })
+      : await apiCall('addItem', { title, type, url, duration, loops, fit, text });
     if (!res.success) return showToast(res.message, 'error');
     closeModal();
     showToast('נשמר ✓', 'success');

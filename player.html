@@ -104,6 +104,63 @@
   /* toasts are irrelevant on the kiosk screen */
   .toast-container { display: none !important; }
 
+  /* ══════════════════════════════════════════════════════════
+     TEXT ITEMS — a plain slide, and the office notice template.
+     The notice block below is meant to be replaced wholesale when a
+     designed template arrives: only these rules and the markup in
+     renderNotice() decide how it looks.
+     ══════════════════════════════════════════════════════════ */
+  .txt {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    direction: rtl; text-align: center;
+    padding: 8vmin 7vmin;
+    overflow: hidden;
+  }
+
+  /* A slide: just the words, on the house background. */
+  .slide {
+    background: radial-gradient(ellipse at 50% -10%, #2a2416 0%, #0d0f14 55%, #000 100%);
+    color: #F1F5F9;
+  }
+  .slide .body { font-weight: 700; line-height: 1.3; white-space: pre-wrap; }
+
+  /* The office notice template. */
+  .notice {
+    background: linear-gradient(160deg, #14181f 0%, #0d0f14 60%, #000 100%);
+    color: #F1F5F9;
+    justify-content: flex-start;
+    padding: 0;
+  }
+  .notice .band {
+    width: 100%;
+    background: linear-gradient(135deg, #FBBF24, #D97706);
+    color: #0d0f14;
+    padding: 3.2vmin 6vmin;
+    display: flex; align-items: center; justify-content: space-between; gap: 3vmin;
+  }
+  .notice .band-label { font-size: 4.4vmin; font-weight: 900; letter-spacing: 0.02em; }
+  .notice .band-date  { font-size: 2.8vmin; font-weight: 700; opacity: 0.75; direction: rtl; }
+  .notice .inner {
+    flex: 1; width: 100%;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 7vmin 7vmin 9vmin;
+  }
+  .notice .heading {
+    font-size: 7vmin; font-weight: 900; line-height: 1.15;
+    color: #FBBF24; margin-bottom: 5vmin;
+  }
+  .notice .body { font-weight: 600; line-height: 1.45; white-space: pre-wrap; color: #E2E8F0; }
+  .notice .rule {
+    width: 22vmin; height: 0.7vmin; border-radius: 999px;
+    background: rgba(251, 191, 36, 0.5); margin-bottom: 5vmin;
+  }
+  .notice .foot {
+    font-size: 2.6vmin; font-weight: 600; color: #64748B;
+    padding-bottom: 4vmin;
+  }
+
   /* ── On-screen file manager ── */
   #filesCorner {
     position: fixed; top: 0; left: 0; width: 12vmin; height: 12vmin;
@@ -434,6 +491,8 @@ function renderItem(item) {
     case 'video':   renderVideo(stage, item);   break;
     case 'drive':   renderDrive(stage, item);   break;
     case 'local':   renderLocal(stage, item);   break;
+    case 'slide':   renderSlide(stage, item);   break;
+    case 'notice':  renderNotice(stage, item);  break;
     case 'image':   renderImage(stage, item);   break;
     default:        renderWebsite(stage, item); break;
   }
@@ -588,6 +647,81 @@ function coverIframe(f) {
   if (S.coverResize) window.removeEventListener('resize', S.coverResize);
   S.coverResize = apply;
   window.addEventListener('resize', apply);
+}
+
+// Long text has to stay on screen without a scrollbar, so the size steps down
+// as the message gets longer.
+function textSize(str) {
+  const n = (str || '').length;
+  if (n <= 40)  return '9vmin';
+  if (n <= 110) return '6.4vmin';
+  if (n <= 260) return '4.8vmin';
+  if (n <= 500) return '3.6vmin';
+  return '2.9vmin';
+}
+
+function renderSlide(stage, item) {
+  const box = document.createElement('div');
+  box.className = 'txt slide';
+  const body = document.createElement('div');
+  body.className = 'body';
+  body.style.fontSize = textSize(item.text);
+  body.textContent = item.text || item.title || '';
+  box.appendChild(body);
+  stage.appendChild(box);
+  S.timedAdvance = true;      // static content: leaves on a timer
+  markReady(item);
+  armTimers(item);
+}
+
+// ── Office notice template ──
+// Swap the markup here (and the .notice rules in the stylesheet) to change the
+// design. The content it receives is always: item.title = heading,
+// item.text = body.
+function renderNotice(stage, item) {
+  const box = document.createElement('div');
+  box.className = 'txt notice';
+
+  const band = document.createElement('div');
+  band.className = 'band';
+  const label = document.createElement('div');
+  label.className = 'band-label';
+  label.textContent = 'הודעה';
+  const date = document.createElement('div');
+  date.className = 'band-date';
+  date.textContent = new Date().toLocaleDateString('he-IL',
+    { weekday: 'long', day: 'numeric', month: 'long' });
+  band.appendChild(label);
+  band.appendChild(date);
+
+  const inner = document.createElement('div');
+  inner.className = 'inner';
+  if (item.title) {
+    const h = document.createElement('div');
+    h.className = 'heading';
+    h.textContent = item.title;
+    inner.appendChild(h);
+    const rule = document.createElement('div');
+    rule.className = 'rule';
+    inner.appendChild(rule);
+  }
+  const body = document.createElement('div');
+  body.className = 'body';
+  body.style.fontSize = textSize(item.text);
+  body.textContent = item.text || '';
+  inner.appendChild(body);
+
+  const foot = document.createElement('div');
+  foot.className = 'foot';
+  foot.textContent = (S.settings && S.settings.kioskName) || '';
+
+  box.appendChild(band);
+  box.appendChild(inner);
+  box.appendChild(foot);
+  stage.appendChild(box);
+  S.timedAdvance = true;
+  markReady(item);
+  armTimers(item);
 }
 
 function renderWebsite(stage, item) {

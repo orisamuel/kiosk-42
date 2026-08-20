@@ -80,8 +80,10 @@ function findRow(sheet, colIndex, value) {
 // ============================================================
 // TABLE: PLAYLIST
 // Schema: id(0), title(1), type(2), url(3), duration(4), active(5), order(6), created(7),
-//         loop(8), fit(9), loops(10)
-//   type:     youtube | video | drive | website | image
+//         loop(8), fit(9), loops(10), text(11)
+//   type:     youtube | video | drive | local | website | image | slide | notice
+//   url:      the address — empty for slide/notice, which carry text instead
+//   text:     body text for slide/notice (the item's title is the heading)
 //   duration: seconds. Videos ignore it unless set (they run on their own length);
 //             websites/images fall back to defaultDuration.
 //   active:   'כן' / 'לא'
@@ -94,7 +96,12 @@ function findRow(sheet, colIndex, value) {
 // ============================================================
 
 const PLAYLIST_HEADERS = ['id', 'title', 'type', 'url', 'duration', 'active', 'order',
-                          'created', 'loop', 'fit', 'loops'];
+                          'created', 'loop', 'fit', 'loops', 'text'];
+
+// Types the player draws itself from text, with no address to fetch.
+function isTextType(t) {
+  return t === 'slide' || t === 'notice';
+}
 
 // Play count: 0 = forever, N = N times. Blank falls back to the legacy
 // loop flag so rows written before this column keep behaving the same.
@@ -126,6 +133,9 @@ function getPlaylist(currentTitle, localFiles, bootId) {
     if (data.length && String(data[0][10] || '') !== 'loops') {
       sheet.getRange(1, 11).setValue('loops');
     }
+    if (data.length && String(data[0][11] || '') !== 'text') {
+      sheet.getRange(1, 12).setValue('text');
+    }
     const items = data.length <= 1 ? [] : data.slice(1)
       .map(r => ({
         id:       String(r[0] || ''),
@@ -138,9 +148,11 @@ function getPlaylist(currentTitle, localFiles, bootId) {
         created:  normalizeDate(r[7]),
         loops:    normalizeLoops(r[10], r[8]),
         loop:     normalizeLoops(r[10], r[8]) === 0,  // legacy: infinite?
-        fit:      String(r[9] || '')
+        fit:      String(r[9] || ''),
+        text:     String(r[11] || '')
       }))
-      .filter(it => it.id && it.url)
+      // Slides and notices have no url — they carry their own text.
+      .filter(it => it.id && (it.url || it.text))
       .sort((a, b) => a.order - b.order);
 
     if (currentTitle) {
@@ -171,7 +183,8 @@ function parseLoopsParam(v) {
 
 function addItem(d) {
   try {
-    if (!d.title || !d.url) return { success: false, message: 'חסר שם או כתובת' };
+    if (!d.title) return { success: false, message: 'חסר שם' };
+    if (!d.url && !d.text) return { success: false, message: 'חסר כתובת או טקסט' };
     const sheet = ensureSheet('playlist', PLAYLIST_HEADERS);
     const data = sheet.getDataRange().getValues();
     let maxOrder = 0;
@@ -190,7 +203,8 @@ function addItem(d) {
       fmtDate(new Date()),
       parseLoopsParam(d.loops) === 0 ? 'כן' : 'לא',
       d.fit === 'contain' || d.fit === 'cover' ? d.fit : '',
-      parseLoopsParam(d.loops)
+      parseLoopsParam(d.loops),
+      d.text || ''
     ]);
     return { success: true, message: 'נוסף לפלייליסט', id: id };
   } catch (e) {
@@ -210,6 +224,7 @@ function updateItem(d) {
     if (d.duration !== undefined) sheet.getRange(row, 5).setValue(parseInt(d.duration) || 0);
     if (d.active !== undefined)   sheet.getRange(row, 6).setValue(d.active === 'true' || d.active === true ? 'כן' : 'לא');
     if (d.fit !== undefined)      sheet.getRange(row, 10).setValue(d.fit === 'contain' || d.fit === 'cover' ? d.fit : '');
+    if (d.text !== undefined)     sheet.getRange(row, 12).setValue(d.text);
     if (d.loops !== undefined) {
       const n = parseLoopsParam(d.loops);
       sheet.getRange(row, 11).setValue(n);
@@ -428,12 +443,13 @@ function doPost(e) {
       case 'addItem':
         return jsonResponse(addItem({
           title: p.title, type: p.type, url: p.url, duration: p.duration,
-          loops: p.loops, fit: p.fit
+          loops: p.loops, fit: p.fit, text: p.text
         }));
       case 'updateItem':
         return jsonResponse(updateItem({
           id: p.id, title: p.title, type: p.type, url: p.url,
-          duration: p.duration, active: p.active, loops: p.loops, fit: p.fit
+          duration: p.duration, active: p.active, loops: p.loops, fit: p.fit,
+          text: p.text
         }));
       case 'deleteItem':
         return jsonResponse(deleteItem(p.id));
