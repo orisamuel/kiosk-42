@@ -195,6 +195,7 @@ const LOAD_TIMEOUT_MS   = 7000;
 const DRIVE_TRY_TIMEOUT = 3000;   // per Drive URL strategy
 const SINGLE_RETRY_MS   = 20000;  // lone broken item: retry instead of rotating
 const MAX_NATIVE_PX     = 2560;   // largest player width we ask the device to render
+const DOUBLE_TAP_MS     = 600;    // generous window: a finger on a wall-mounted screen
 
 // ════════════════════════════════════════════════════════════
 // State
@@ -1059,7 +1060,7 @@ function goFullscreen() {
   document.addEventListener('pointerdown', e => {
     if (S.filesOpen) return;                    // the manager has its own buttons
     const now = e.timeStamp || Date.now();
-    if (now - lastTap < 450) { lastTap = 0; toggleFullscreen(); }
+    if (now - lastTap < DOUBLE_TAP_MS) { lastTap = 0; toggleFullscreen(); }
     else lastTap = now;
   }, { passive: true });
 }
