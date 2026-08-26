@@ -692,8 +692,10 @@ function renderTextItem(stage, item, variant) {
   box.appendChild(bubble);
   stage.appendChild(box);
 
-  // Size the text once it is in the document and the bubble has real pixels.
-  requestAnimationFrame(() => {
+  // Size the text now that the bubble has real pixels. Done synchronously
+  // rather than in requestAnimationFrame, which never fires while the page is
+  // in the background — that would leave the text at its default size.
+  const sizeText = () => {
     const len = (item.text || '').length;
     const bodyMax = len <= 30 ? 7.5 : len <= 90 ? 6 : len <= 200 ? 4.6 : 3.8;
     if (heading) {
@@ -710,7 +712,12 @@ function renderTextItem(stage, item, variant) {
       body.style.fontSize =
         (parseFloat(body.style.fontSize) * 0.93).toFixed(2) + 'vmin';
     }
-  });
+  };
+  sizeText();
+  // Simpler may still be downloading; its metrics differ from the fallback.
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(() => { if (S.currentId === item.id) sizeText(); });
+  }
 
   S.timedAdvance = true;   // static content: leaves on a timer
   markReady(item);
