@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#000000">
 <title>הקיוסק של 42 — נגן</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Assistant:wght@400;600;700;800&display=swap" rel="stylesheet">
 <link rel="preconnect" href="https://www.youtube.com" crossorigin>
 <link rel="preconnect" href="https://i.ytimg.com" crossorigin>
 <script src="config.js"></script>
@@ -16,36 +18,53 @@
     background: #000;
     overflow: hidden;
     cursor: none;
-    font-family: 'Heebo', 'Segoe UI', sans-serif;
+    font-family: 'Assistant', 'Heebo', 'Segoe UI', sans-serif;
   }
 
-  /* ── Waiting screen ──
-     Always rendered, sitting UNDER the stage. Any moment where content isn't
-     ready yet (loading, switching, a broken item) shows this instead of black. */
+  /* ── Waiting board ──
+     Always rendered, sitting UNDER the stage, so any moment where content isn't
+     ready (loading, switching, a broken item) shows this instead of black.
+     Built from the same studio artwork as the notices, on the orange board so
+     each state reads as itself: orange = waiting, pink = notice, purple = slide.
+     The clock and the message sit inside the speech bubble. */
   #idle {
     position: fixed; inset: 0; z-index: 1;
+    direction: rtl;
+    background: #F0A03C url('assets/slide-orange.png') center / cover no-repeat;
+    color: #2E0B33;
+  }
+  #idleBubble {
+    position: absolute;
+    left: 13.7%; right: 10.7%; top: 9.6%; height: 77.2%;
+    padding: 6% 7%;
     display: flex; flex-direction: column;
     align-items: center; justify-content: center;
-    direction: rtl;
-    background: radial-gradient(ellipse at 50% -20%, #2a2416 0%, #0d0f14 55%, #000 100%);
-    color: #F1F5F9;
+    text-align: center; overflow: hidden;
   }
-  /* vmin so the waiting screen scales the same on landscape and portrait screens */
   #fbClock {
-    font-size: 22vmin; font-weight: 800; line-height: 1;
-    letter-spacing: 0.02em;
-    color: #FBBF24;
-    text-shadow: 0 0 80px rgba(245, 158, 11, 0.35);
+    font-size: 21vmin; font-weight: 800; line-height: 0.95;
+    letter-spacing: -0.01em;
+    color: #2E0B33;
     font-variant-numeric: tabular-nums;
     direction: ltr;
   }
-  #fbDate { font-size: 4.6vmin; font-weight: 400; color: #94A3B8; margin-top: 2vh; text-align: center; }
-  #fbMessage {
-    font-size: 5vmin; font-weight: 700; color: #F1F5F9;
-    margin-top: 7vh; text-align: center; padding: 0 8vmin; line-height: 1.35;
+  #fbDate {
+    font-size: 3.6vmin; font-weight: 700; color: #7B4BA6;
+    margin-top: 1.2vmin;
   }
-  #fbName { font-size: 3.2vmin; font-weight: 600; color: #64748B; margin-top: 3vh; text-align: center; }
-  #fbHint { font-size: 2.4vmin; color: #475569; margin-top: 2vh; text-align: center; padding: 0 6vmin; }
+  #fbRule {
+    width: 26%; height: 0.8vmin; border-radius: 999px;
+    background: #F0A03C; margin: 5vmin 0;
+  }
+  #fbMessage {
+    font-size: 5.2vmin; font-weight: 800; color: #E5187F;
+    line-height: 1.25;
+  }
+  #fbName {
+    font-size: 2.8vmin; font-weight: 700; color: #7B4BA6;
+    margin-top: 4vmin;
+  }
+  #fbHint { font-size: 2.4vmin; font-weight: 600; color: #E5187F; margin-top: 2vmin; }
 
   /* ── Content stage ──
      Hidden until the content actually starts playing/loading is done, so a
@@ -76,14 +95,13 @@
 
   /* ── Clock overlay while content plays ── */
   #clockPill {
-    position: fixed; bottom: 22px; left: 22px; z-index: 10;
-    padding: 8px 18px;
-    background: rgba(0, 0, 0, 0.55);
-    border: 1px solid rgba(255, 255, 255, 0.12);
+    position: fixed; bottom: 3vmin; left: 3vmin; z-index: 10;
+    padding: 1.2vmin 2.6vmin;
+    background: #fff;
     border-radius: 999px;
-    color: #fff; font-size: 1.4rem; font-weight: 700;
+    color: #2E0B33; font-size: 3vmin; font-weight: 800;
     font-variant-numeric: tabular-nums;
-    backdrop-filter: blur(6px);
+    box-shadow: 0.6vmin 0.6vmin 0 #2E0B33;
     direction: ltr;
     display: none;
   }
@@ -110,29 +128,13 @@
      with the typed text laid inside the speech bubble. The bubble's position
      was measured off the artwork, so these percentages track it exactly.
      ══════════════════════════════════════════════════════════ */
-  @font-face {
-    font-family: 'Simpler'; font-style: normal; font-weight: 400;
-    src: local('Simpler'), local('Simpler-Regular'), url('fonts/simpler-regular.woff2') format('woff2');
-    font-display: swap;
-  }
-  @font-face {
-    font-family: 'Simpler'; font-style: normal; font-weight: 700;
-    src: local('Simpler Bold'), local('Simpler-Bold'), url('fonts/simpler-bold.woff2') format('woff2');
-    font-display: swap;
-  }
-  @font-face {
-    font-family: 'Simpler'; font-style: normal; font-weight: 900;
-    src: local('Simpler Black'), local('Simpler-Black'), url('fonts/simpler-black.woff2') format('woff2');
-    font-display: swap;
-  }
-
   .txt {
     position: absolute; inset: 0;
     background-repeat: no-repeat;
     background-position: center;
     background-size: cover;
     direction: rtl;
-    font-family: 'Simpler', 'Assistant', 'Heebo', sans-serif;
+    font-family: inherit;
   }
   .txt.notice { background-image: url('assets/notice-pink.png'); }
   .txt.slide  { background-image: url('assets/slide-purple.png'); }
@@ -209,11 +211,14 @@
 <body>
 
 <div id="idle">
-  <div id="fbClock">--:--</div>
-  <div id="fbDate"></div>
-  <div id="fbMessage"></div>
-  <div id="fbName"></div>
-  <div id="fbHint"></div>
+  <div id="idleBubble">
+    <div id="fbClock">--:--</div>
+    <div id="fbDate"></div>
+    <div id="fbRule"></div>
+    <div id="fbMessage"></div>
+    <div id="fbName"></div>
+    <div id="fbHint"></div>
+  </div>
 </div>
 
 <div id="stage"></div>
@@ -411,7 +416,7 @@ function applyData(res, fromCache) {
 
   S.settings = settings;
   $('fbName').textContent = settings.kioskName || '';
-  $('fbMessage').textContent = settings.idleMessage || '';
+  setIdleMessage(settings.idleMessage || '');
   updateClockVisibility();
 
   const active = (res.items || []).filter(i => i.active);
@@ -1032,6 +1037,20 @@ function showStage(show) {
 
 function stageVisible() {
   return $('stage').classList.contains('visible');
+}
+
+// The waiting-screen message is free text, so size it to the bubble the same
+// way notices are sized. Only recomputed when the text actually changes.
+let lastIdleMessage = null;
+function setIdleMessage(msg) {
+  const el = $('fbMessage');
+  if (msg === lastIdleMessage) return;
+  lastIdleMessage = msg;
+  el.textContent = msg;
+  el.style.fontSize = '';
+  if (!msg) return;
+  const base = msg.length <= 30 ? 5.2 : msg.length <= 70 ? 4.2 : 3.4;
+  fitText(el, $('idleBubble'), base);
 }
 
 function startClocks() {
