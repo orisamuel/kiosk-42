@@ -105,61 +105,63 @@
   .toast-container { display: none !important; }
 
   /* ══════════════════════════════════════════════════════════
-     TEXT ITEMS — a plain slide, and the office notice template.
-     The notice block below is meant to be replaced wholesale when a
-     designed template arrives: only these rules and the markup in
-     renderNotice() decide how it looks.
+     TEXT ITEMS — the office notice and the plain slide.
+     Both are the studio artwork (assets/*.png, 9:16, same as the screen)
+     with the typed text laid inside the speech bubble. The bubble's position
+     was measured off the artwork, so these percentages track it exactly.
      ══════════════════════════════════════════════════════════ */
+  @font-face {
+    font-family: 'Simpler'; font-style: normal; font-weight: 400;
+    src: local('Simpler'), local('Simpler-Regular'), url('fonts/simpler-regular.woff2') format('woff2');
+    font-display: swap;
+  }
+  @font-face {
+    font-family: 'Simpler'; font-style: normal; font-weight: 700;
+    src: local('Simpler Bold'), local('Simpler-Bold'), url('fonts/simpler-bold.woff2') format('woff2');
+    font-display: swap;
+  }
+  @font-face {
+    font-family: 'Simpler'; font-style: normal; font-weight: 900;
+    src: local('Simpler Black'), local('Simpler-Black'), url('fonts/simpler-black.woff2') format('woff2');
+    font-display: swap;
+  }
+
   .txt {
     position: absolute; inset: 0;
+    background-repeat: no-repeat;
+    background-position: center;
+    background-size: cover;
+    direction: rtl;
+    font-family: 'Simpler', 'Assistant', 'Heebo', sans-serif;
+  }
+  .txt.notice { background-image: url('assets/notice-pink.png'); }
+  .txt.slide  { background-image: url('assets/slide-purple.png'); }
+
+  /* The white speech bubble, as measured on the artwork. */
+  .bubble {
+    position: absolute;
     display: flex; flex-direction: column;
     align-items: center; justify-content: center;
-    direction: rtl; text-align: center;
-    padding: 8vmin 7vmin;
+    text-align: center;
+    color: #2E0B33;
     overflow: hidden;
   }
+  .notice .bubble { left: 13.7%; right: 10.7%; top: 29.9%; height: 60.2%; }
+  .slide  .bubble { left: 13.7%; right: 10.7%; top:  9.6%; height: 77.2%; }
+  /* Breathing room inside the rounded bubble. */
+  .bubble { padding: 5% 7%; }
 
-  /* A slide: just the words, on the house background. */
-  .slide {
-    background: radial-gradient(ellipse at 50% -10%, #2a2416 0%, #0d0f14 55%, #000 100%);
-    color: #F1F5F9;
+  .bubble .heading {
+    font-weight: 900; line-height: 1.1;
+    color: #E5187F;
+    margin-bottom: 0.5em;
   }
-  .slide .body { font-weight: 700; line-height: 1.3; white-space: pre-wrap; }
-
-  /* The office notice template. */
-  .notice {
-    background: linear-gradient(160deg, #14181f 0%, #0d0f14 60%, #000 100%);
-    color: #F1F5F9;
-    justify-content: flex-start;
-    padding: 0;
+  .slide .bubble .heading { color: #7B4BA6; }
+  .bubble .body { font-weight: 700; line-height: 1.35; white-space: pre-wrap; }
+  .bubble .when {
+    margin-top: 0.8em; font-weight: 700; color: #7B4BA6;
   }
-  .notice .band {
-    width: 100%;
-    background: linear-gradient(135deg, #FBBF24, #D97706);
-    color: #0d0f14;
-    padding: 3.2vmin 6vmin;
-    display: flex; align-items: center; justify-content: space-between; gap: 3vmin;
-  }
-  .notice .band-label { font-size: 4.4vmin; font-weight: 900; letter-spacing: 0.02em; }
-  .notice .band-date  { font-size: 2.8vmin; font-weight: 700; opacity: 0.75; direction: rtl; }
-  .notice .inner {
-    flex: 1; width: 100%;
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    padding: 7vmin 7vmin 9vmin;
-  }
-  .notice .heading {
-    font-size: 7vmin; font-weight: 900; line-height: 1.15;
-    color: #FBBF24; margin-bottom: 5vmin;
-  }
-  .notice .body { font-weight: 600; line-height: 1.45; white-space: pre-wrap; color: #E2E8F0; }
-  .notice .rule {
-    width: 22vmin; height: 0.7vmin; border-radius: 999px;
-    background: rgba(251, 191, 36, 0.5); margin-bottom: 5vmin;
-  }
-  .notice .foot {
-    font-size: 2.6vmin; font-weight: 600; color: #64748B;
-    padding-bottom: 4vmin;
-  }
+  .slide .bubble .when { color: #E5187F; }
 
   /* ── On-screen file manager ── */
   #filesCorner {
@@ -649,83 +651,74 @@ function coverIframe(f) {
   window.addEventListener('resize', apply);
 }
 
-// Long text has to stay on screen without a scrollbar, so the size steps down
-// as the message gets longer.
-function textSize(str) {
-  const n = (str || '').length;
-  if (n <= 40)  return '9vmin';
-  if (n <= 110) return '6.4vmin';
-  if (n <= 260) return '4.8vmin';
-  if (n <= 500) return '3.6vmin';
-  return '2.9vmin';
+// Text is typed by whoever writes the notice, so it can be one word or a
+// paragraph. These steps keep it filling the bubble without ever overflowing.
+function fitText(el, box, maxEm) {
+  // Start big, shrink until it fits the bubble's height.
+  let size = maxEm;
+  el.style.fontSize = size + 'vmin';
+  for (let i = 0; i < 40 && box.scrollHeight > box.clientHeight; i++) {
+    size *= 0.93;
+    el.style.fontSize = size.toFixed(2) + 'vmin';
+  }
+  return size;
 }
 
-function renderSlide(stage, item) {
+// Shared builder: the studio artwork with the typed text inside its bubble.
+// `variant` picks which piece of art and which accent the heading takes.
+function renderTextItem(stage, item, variant) {
   const box = document.createElement('div');
-  box.className = 'txt slide';
+  box.className = 'txt ' + variant;
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+
+  // A notice leads with its subject; the artwork already says "הודעה חשובה".
+  // A slide is just the words, so its title stays a playlist label.
+  const showHeading = variant === 'notice' && item.title;
+  let heading = null;
+  if (showHeading) {
+    heading = document.createElement('div');
+    heading.className = 'heading';
+    heading.textContent = item.title;
+    bubble.appendChild(heading);
+  }
+
   const body = document.createElement('div');
   body.className = 'body';
-  body.style.fontSize = textSize(item.text);
-  body.textContent = item.text || item.title || '';
-  box.appendChild(body);
+  body.textContent = item.text || (variant === 'slide' ? item.title : '') || '';
+  bubble.appendChild(body);
+
+  box.appendChild(bubble);
   stage.appendChild(box);
-  S.timedAdvance = true;      // static content: leaves on a timer
+
+  // Size the text once it is in the document and the bubble has real pixels.
+  requestAnimationFrame(() => {
+    const len = (item.text || '').length;
+    const bodyMax = len <= 30 ? 7.5 : len <= 90 ? 6 : len <= 200 ? 4.6 : 3.8;
+    if (heading) {
+      heading.style.fontSize = (item.title.length <= 22 ? 6 : 4.6) + 'vmin';
+    }
+    fitText(body, bubble, bodyMax);
+    // Heading plus body may still be too tall together — shrink both a notch.
+    let guard = 0;
+    while (bubble.scrollHeight > bubble.clientHeight && guard++ < 25) {
+      if (heading) {
+        heading.style.fontSize =
+          (parseFloat(heading.style.fontSize) * 0.93).toFixed(2) + 'vmin';
+      }
+      body.style.fontSize =
+        (parseFloat(body.style.fontSize) * 0.93).toFixed(2) + 'vmin';
+    }
+  });
+
+  S.timedAdvance = true;   // static content: leaves on a timer
   markReady(item);
   armTimers(item);
 }
 
-// ── Office notice template ──
-// Swap the markup here (and the .notice rules in the stylesheet) to change the
-// design. The content it receives is always: item.title = heading,
-// item.text = body.
-function renderNotice(stage, item) {
-  const box = document.createElement('div');
-  box.className = 'txt notice';
-
-  const band = document.createElement('div');
-  band.className = 'band';
-  const label = document.createElement('div');
-  label.className = 'band-label';
-  label.textContent = 'הודעה';
-  const date = document.createElement('div');
-  date.className = 'band-date';
-  date.textContent = new Date().toLocaleDateString('he-IL',
-    { weekday: 'long', day: 'numeric', month: 'long' });
-  band.appendChild(label);
-  band.appendChild(date);
-
-  const inner = document.createElement('div');
-  inner.className = 'inner';
-  if (item.title) {
-    const h = document.createElement('div');
-    h.className = 'heading';
-    h.textContent = item.title;
-    inner.appendChild(h);
-    const rule = document.createElement('div');
-    rule.className = 'rule';
-    inner.appendChild(rule);
-  }
-  const body = document.createElement('div');
-  body.className = 'body';
-  body.style.fontSize = textSize(item.text);
-  body.textContent = item.text || '';
-  inner.appendChild(body);
-
-  box.appendChild(band);
-  box.appendChild(inner);
-  // Only take up room for a footer when there is a name to show.
-  const footText = (S.settings && S.settings.kioskName) || '';
-  if (footText) {
-    const foot = document.createElement('div');
-    foot.className = 'foot';
-    foot.textContent = footText;
-    box.appendChild(foot);
-  }
-  stage.appendChild(box);
-  S.timedAdvance = true;
-  markReady(item);
-  armTimers(item);
-}
+function renderSlide(stage, item)  { renderTextItem(stage, item, 'slide'); }
+function renderNotice(stage, item) { renderTextItem(stage, item, 'notice'); }
 
 function renderWebsite(stage, item) {
   const f = document.createElement('iframe');
