@@ -81,7 +81,7 @@ function findRow(sheet, colIndex, value) {
 // TABLE: PLAYLIST
 // Schema: id(0), title(1), type(2), url(3), duration(4), active(5), order(6), created(7),
 //         loop(8), fit(9), loops(10), text(11)
-//   type:     youtube | video | drive | local | website | image | slide | notice
+//   type:     youtube | video | drive | local | website | image | slide | notice | error
 //   url:      the address — empty for slide/notice, which carry text instead
 //   text:     body text for slide/notice (the item's title is the heading)
 //   duration: seconds. Videos ignore it unless set (they run on their own length);
@@ -100,7 +100,7 @@ const PLAYLIST_HEADERS = ['id', 'title', 'type', 'url', 'duration', 'active', 'o
 
 // Types the player draws itself from text, with no address to fetch.
 function isTextType(t) {
-  return t === 'slide' || t === 'notice';
+  return t === 'slide' || t === 'notice' || t === 'error';
 }
 
 // Play count: 0 = forever, N = N times. Blank falls back to the legacy

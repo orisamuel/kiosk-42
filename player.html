@@ -152,6 +152,7 @@
   }
   .txt.notice { background-image: url('assets/notice-pink.png'); }
   .txt.slide  { background-image: url('assets/slide-purple.png'); }
+  .txt.err    { background-image: url('assets/error-pink.png'); }
 
   /* The white speech bubble, as measured on the artwork. */
   .bubble {
@@ -164,6 +165,8 @@
   }
   .notice .bubble { left: 13.7%; right: 10.7%; top: 29.9%; height: 60.2%; }
   .slide  .bubble { left: 13.7%; right: 10.7%; top:  9.6%; height: 77.2%; }
+  /* The error board has no bubble — the text sits in the clear strip above the robot. */
+  .err    .bubble { left: 6%; right: 6%; top: 3.5%; height: 20.5%; }
   /* Breathing room inside the rounded bubble. */
   .bubble { padding: 5% 7%; }
 
@@ -174,6 +177,11 @@
   }
   .slide .bubble .heading { color: #7B4BA6; }
   .bubble .body { font-weight: 700; line-height: 1.35; white-space: pre-wrap; }
+  /* On the pink grid (no white bubble behind it) the text goes white + dark drop. */
+  .err .bubble .body {
+    color: #fff; font-weight: 800;
+    text-shadow: 0.35vmin 0.35vmin 0 #2E0B33;
+  }
   .bubble .when {
     margin-top: 0.8em; font-weight: 700; color: #7B4BA6;
   }
@@ -516,6 +524,7 @@ function renderItem(item) {
     case 'local':   renderLocal(stage, item);   break;
     case 'slide':   renderSlide(stage, item);   break;
     case 'notice':  renderNotice(stage, item);  break;
+    case 'error':   renderError(stage, item);   break;
     case 'image':   renderImage(stage, item);   break;
     default:        renderWebsite(stage, item); break;
   }
@@ -764,6 +773,9 @@ function renderTextItem(stage, item, variant) {
 
 function renderSlide(stage, item)  { renderTextItem(stage, item, 'slide'); }
 function renderNotice(stage, item) { renderTextItem(stage, item, 'notice'); }
+// The ERROR artwork as deliberate content — same board the player flashes on a
+// failure, here with the admin's own text in the strip above the robot.
+function renderError(stage, item)  { renderTextItem(stage, item, 'err'); }
 
 function renderWebsite(stage, item) {
   const f = document.createElement('iframe');

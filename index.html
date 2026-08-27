@@ -330,6 +330,7 @@ document.getElementById('sheetLink').href          = CONFIG.SHEETS_URL;
 const TYPE_META = {
   notice:  { emoji: '📢', label: 'הודעה למשרד',  desc: 'כותרת וטקסט על רקע מעוצב' },
   slide:   { emoji: '📝', label: 'שקופית טקסט',  desc: 'טקסט גדול במרכז המסך' },
+  error:   { emoji: '🤖', label: 'מסך ERROR',    desc: 'לוח הרובוט עם טקסט משלכם' },
   youtube: { emoji: '▶️', label: 'יוטיוב',        desc: 'קישור לסרטון או שידור חי' },
   website: { emoji: '🌐', label: 'אתר',           desc: 'כל כתובת אינטרנט' },
   image:   { emoji: '🖼️', label: 'תמונה',         desc: 'קישור לקובץ תמונה' },
@@ -480,7 +481,7 @@ function renderList() {
 
 // Types the screen draws from text — no address involved.
 function isTextItem(type) {
-  return type === 'slide' || type === 'notice';
+  return type === 'slide' || type === 'notice' || type === 'error';
 }
 
 function isVideoItem(type) {
@@ -788,6 +789,8 @@ function updateTypeFields() {
     document.getElementById('textLabel').textContent = type === 'notice' ? 'תוכן ההודעה' : 'הטקסט';
     document.getElementById('textHint').textContent = type === 'notice'
       ? 'השם שלמעלה יופיע ככותרת ההודעה על המסך. הטקסט כאן הוא גוף ההודעה.'
+      : type === 'error'
+      ? 'הטקסט יוצג בפס העליון של לוח ה-ERROR, מעל הרובוט. השם שלמעלה נשאר רק לרשימה.'
       : 'הטקסט יוצג במרכז המסך. גודל האותיות מותאם אוטומטית לאורך.';
   }
   if (isVideo) {
