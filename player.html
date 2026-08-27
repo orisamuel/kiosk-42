@@ -7,6 +7,7 @@
 <title>הקיוסק של 42 — נגן</title>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Assistant:wght@400;600;700;800&display=swap" rel="stylesheet">
+<link rel="preload" as="image" href="assets/error-pink.png">
 <link rel="preconnect" href="https://www.youtube.com" crossorigin>
 <link rel="preconnect" href="https://i.ytimg.com" crossorigin>
 <script src="config.js"></script>
@@ -92,6 +93,19 @@
     inset: auto; top: 50%; left: 50%;
     transform-origin: center center;
   }
+
+  /* ── Error board ──
+     The studio ERROR artwork (the sad robot). Flashed when an item fails to
+     start or dies mid-play — instead of the waiting board — so a broken link
+     reads as an error, not as an oddly long wait. Sits above the stage. */
+  #errBoard {
+    position: fixed; inset: 0; z-index: 3;
+    background: #E5187F url('assets/error-pink.png') center / cover no-repeat;
+    opacity: 0; visibility: hidden;
+    transition: opacity 0.25s ease, visibility 0.25s ease;
+    pointer-events: none;
+  }
+  #errBoard.show { opacity: 1; visibility: visible; }
 
   /* ── Clock overlay while content plays ── */
   #clockPill {
@@ -222,6 +236,8 @@
 </div>
 
 <div id="stage"></div>
+
+<div id="errBoard"></div>
 
 <div id="clockPill">--:--</div>
 <div id="offlineDot"></div>
@@ -515,9 +531,26 @@ function armLoadTimeout(item, ms) {
   S.loadTimer = setTimeout(() => {
     if (S.currentId !== item.id) return;
     if (S.pending && S.pending.id === item.id && S.pending.ready) return;
+    flagError();
     if (S.items.length > 1) next();
     else { S.currentId = null; setTimeout(() => renderItem(item), SINGLE_RETRY_MS); }
   }, ms);
+}
+
+// ── Error board ──
+// A failed item flashes the studio ERROR artwork over the waiting board until
+// the next item is revealed (or for a few seconds, whichever comes first).
+function flagError() {
+  const el = $('errBoard');
+  el.classList.add('show');
+  clearTimeout(S.errTimer);
+  S.errTimer = setTimeout(() => el.classList.remove('show'), Math.max(gapMs() + 2000, 5000));
+}
+
+// The standard "this item is broken" exit: show the error board, move on.
+function failSkip(delay) {
+  flagError();
+  setTimeout(next, delay || 1500);
 }
 
 // An item finished loading. `start` (optional) begins playback and is only
@@ -551,7 +584,7 @@ function tryReveal(item) {
   if (isVideoType(item)) {
     clearTimeout(S.playWatchdog);
     S.playWatchdog = setTimeout(() => {
-      if (S.currentId === item.id && !S.playingSeen) next();
+      if (S.currentId === item.id && !S.playingSeen) { flagError(); next(); }
     }, 10000);
   }
 }
@@ -748,7 +781,7 @@ function renderImage(stage, item) {
   img.alt = item.title;
   img.style.objectFit = fitFor(item);
   img.addEventListener('load', () => markReady(item));
-  img.addEventListener('error', () => setTimeout(next, 1500), { once: true });
+  img.addEventListener('error', () => failSkip(), { once: true });
   img.src = item.url;
   stage.appendChild(img);
 }
@@ -847,7 +880,7 @@ function renderVideo(stage, item) {
     startVideo(warm.el);
     return;
   }
-  stage.appendChild(makeVideoEl(item, item.url, () => setTimeout(next, 1500), true));
+  stage.appendChild(makeVideoEl(item, item.url, () => failSkip(), true));
 }
 
 // A file sitting in this device's own storage. `url` holds the file name.
@@ -858,7 +891,7 @@ async function renderLocal(stage, item) {
   if (!rec || !rec.blob) {
     // The playlist points at a file this screen doesn't have — skip it and let
     // the admin see the mismatch in the panel.
-    setTimeout(next, 1200);
+    failSkip(1200);
     return;
   }
   const warm = takePreloaded(item);
@@ -878,7 +911,7 @@ async function renderLocal(stage, item) {
     S.timedAdvance = true;  // images advance on a timer, like any still content
     armTimers(item);
   } else {
-    stage.appendChild(makeVideoEl(item, S.objectUrl, () => setTimeout(next, 1500), true));
+    stage.appendChild(makeVideoEl(item, S.objectUrl, () => failSkip(), true));
   }
 }
 
@@ -900,7 +933,7 @@ function driveId(url) {
 // YouTube. Each attempt is kept short so the waiting screen isn't held for long.
 function renderDrive(stage, item) {
   const id = driveId(item.url);
-  if (!id) { setTimeout(next, 1500); return; }
+  if (!id) { failSkip(); return; }
 
   const strategies = [
     'https://drive.usercontent.google.com/download?id=' + id + '&export=download&confirm=t',
@@ -967,7 +1000,7 @@ function loadYtApi() {
 
 async function renderYouTube(stage, item) {
   const vid = ytId(item.url);
-  if (!vid) { setTimeout(next, 1500); return; }
+  if (!vid) { failSkip(); return; }
 
   const holder = document.createElement('div');
   holder.id = 'yt-' + Date.now();
@@ -1022,7 +1055,7 @@ async function renderYouTube(stage, item) {
           try { tuneSafety(item, e.target.getDuration(), e.target.getCurrentTime()); } catch (_) {}
         }
       },
-      onError: () => setTimeout(next, 1500)
+      onError: () => failSkip()
     }
   });
 }
@@ -1032,6 +1065,7 @@ async function renderYouTube(stage, item) {
 // ════════════════════════════════════════════════════════════
 function showStage(show) {
   $('stage').classList.toggle('visible', !!show);
+  if (show) { clearTimeout(S.errTimer); $('errBoard').classList.remove('show'); }
   updateClockVisibility();
 }
 
