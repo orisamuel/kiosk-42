@@ -36,6 +36,7 @@
     margin-bottom: 10px;
   }
   .pl-item.inactive { opacity: 0.5; }
+  .pl-item.pending { border-style: dashed; }
   .pl-top { display: flex; align-items: center; gap: 10px; }
   .pl-emoji { font-size: 1.3rem; }
   .pl-title { font-weight: 700; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -62,6 +63,69 @@
   }
   .icon-btn:hover { background: var(--glass-hover); }
   .icon-btn:disabled { opacity: 0.4; cursor: default; }
+
+  /* ── Drag & drop ── */
+  .drag-handle {
+    cursor: grab;
+    touch-action: none;            /* the handle drags; the rest of the page scrolls */
+    -webkit-touch-callout: none;
+    user-select: none;
+    padding: 4px 2px;
+    color: var(--text-muted);
+    font-size: 1.15rem;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  .drag-handle:active { cursor: grabbing; }
+  .pl-item.drag-ghost { opacity: 0.3; border-style: dashed; border-color: var(--accent); }
+  .pl-item.drag-clone {
+    position: fixed; z-index: 2000; margin: 0;
+    pointer-events: none;
+    box-shadow: var(--shadow-lg);
+    transform: scale(1.02);
+    background: var(--bg-surface);
+  }
+  body.drag-active { user-select: none; -webkit-user-select: none; }
+
+  /* ── Sync indicator ── */
+  .head-badges { display: flex; align-items: center; gap: 10px; }
+  .sync-chip { font-size: 0.75rem; color: var(--text-secondary); display: inline-flex; align-items: center; gap: 6px; min-height: 16px; }
+  .sync-chip .sync-spinner {
+    width: 12px; height: 12px;
+    border: 2px solid var(--glass-border); border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  .sync-chip.saved { color: var(--success); }
+
+  /* ── Type picker (add-item step 1) ── */
+  .type-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .type-tile {
+    display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
+    text-align: right;
+    padding: 12px 14px;
+    background: var(--bg-elevated);
+    border: 1.5px solid var(--glass-border);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    transition: var(--t-fast);
+  }
+  .type-tile:hover { border-color: var(--accent); background: var(--glass-hover); transform: translateY(-1px); }
+  .type-tile .t-emoji { font-size: 1.5rem; }
+  .type-tile .t-label { font-weight: 700; font-size: 0.95rem; }
+  .type-tile .t-desc { font-size: 0.73rem; color: var(--text-muted); }
+
+  .type-chip {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 8px 14px; margin-bottom: 16px;
+    background: var(--bg-elevated);
+    border: 1.5px solid var(--glass-border);
+    border-radius: var(--radius-pill);
+    color: var(--text-primary); font-weight: 700; font-size: 0.9rem;
+    transition: var(--t-fast);
+  }
+  .type-chip:hover { border-color: var(--accent); }
+  .type-chip .chip-change { font-size: 0.75rem; font-weight: 400; color: var(--accent); }
 
   .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   .settings-grid .full { grid-column: 1 / -1; }
@@ -112,9 +176,13 @@
   <div class="card">
     <div class="section-head">
       <h2 style="font-size:1.1rem;">🎞️ הפלייליסט</h2>
-      <span class="badge" id="plCount"></span>
+      <div class="head-badges">
+        <span class="sync-chip" id="syncChip"></span>
+        <span class="badge" id="plCount"></span>
+      </div>
     </div>
     <div id="playlist">טוען...</div>
+    <div class="hint">אפשר לגרור פריטים בידית ⠿ כדי לשנות את הסדר</div>
   </div>
 
   <!-- ── Settings ── -->
@@ -184,67 +252,68 @@
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
 
-    <div class="form-group" id="urlGroup">
-      <label class="form-label">כתובת (URL)</label>
-      <input class="form-input" id="fUrl" type="url" dir="ltr" placeholder="https://..." oninput="autoDetectType()">
-    </div>
-    <div class="form-group" id="textGroup" style="display:none;">
-      <label class="form-label" id="textLabel">הטקסט</label>
-      <textarea class="form-textarea" id="fText" rows="5" placeholder="הטקסט שיוצג על המסך..."></textarea>
-      <div class="hint" id="textHint"></div>
-    </div>
-    <div class="form-group" id="localGroup" style="display:none;">
-      <label class="form-label">קובץ ששמור על המסך</label>
-      <select class="form-select" id="fLocal" onchange="onLocalPick()"></select>
-      <div class="hint" id="localHint"></div>
-    </div>
-    <div class="form-group">
-      <label class="form-label">שם (לתצוגה ברשימה)</label>
-      <input class="form-input" id="fTitle" type="text" placeholder="למשל: סרטון תדמית">
-    </div>
-    <div class="form-group">
-      <label class="form-label">סוג</label>
-      <select class="form-select" id="fType" onchange="updateDurationHint()">
-        <option value="notice">📢 הודעה למשרד</option>
-        <option value="slide">📝 שקופית טקסט</option>
-        <option value="website">🌐 אתר</option>
-        <option value="youtube">▶️ יוטיוב</option>
-        <option value="local">💾 קובץ ששמור על המסך</option>
-        <option value="drive">📁 סרטון מגוגל דרייב</option>
-        <option value="video">🎬 קובץ וידאו (mp4)</option>
-        <option value="image">🖼️ תמונה</option>
-      </select>
-      <div class="hint" id="typeHint"></div>
-    </div>
-    <div class="form-group" id="loopGroup" style="display:none;">
-      <label class="form-label">🔁 כמה פעמים לרוץ</label>
-      <select class="form-select" id="fLoops">
-        <option value="1">פעם אחת — ואז הפריט הבא</option>
-        <option value="2">2 פעמים</option>
-        <option value="3">3 פעמים</option>
-        <option value="5">5 פעמים</option>
-        <option value="10">10 פעמים</option>
-        <option value="0">בלופ בלי סוף</option>
-      </select>
-      <div class="hint">משך התצוגה נקבע לפי אורך הסרטון עצמו.</div>
-    </div>
-    <div class="form-group" id="durationGroup">
-      <label class="form-label">משך תצוגה (שניות)</label>
-      <input class="form-input" id="fDuration" type="number" min="0" placeholder="">
-      <div class="hint" id="durationHint"></div>
-    </div>
-    <div class="form-group" id="fitGroup">
-      <label class="form-label">התאמה למסך</label>
-      <select class="form-select" id="fFit">
-        <option value="">לפי ההגדרה הכללית</option>
-        <option value="contain">שלם (פסים שחורים)</option>
-        <option value="cover">מלא מסך (נחתך)</option>
-      </select>
+    <!-- Step 1: what kind of item? -->
+    <div id="typeStep">
+      <div class="type-grid" id="typeGrid"></div>
     </div>
 
-    <div class="modal-footer">
-      <button class="btn btn-secondary" onclick="closeModal()">ביטול</button>
-      <button class="btn btn-primary" onclick="saveItem()" id="saveItemBtn">שמירה</button>
+    <!-- Step 2: details for the chosen type -->
+    <div id="formStep" style="display:none;">
+      <button type="button" class="type-chip" id="typeChip" onclick="showTypeStep()" title="החלפת סוג הפריט">
+        <span id="chipEmoji"></span>
+        <span id="chipLabel"></span>
+        <span class="chip-change">שינוי ›</span>
+      </button>
+      <div class="hint" id="typeHint" style="margin: -8px 0 14px;"></div>
+
+      <div class="form-group" id="urlGroup">
+        <label class="form-label">כתובת (URL)</label>
+        <input class="form-input" id="fUrl" type="url" dir="ltr" placeholder="https://..." oninput="autoDetectType()">
+      </div>
+      <div class="form-group" id="textGroup" style="display:none;">
+        <label class="form-label" id="textLabel">הטקסט</label>
+        <textarea class="form-textarea" id="fText" rows="5" placeholder="הטקסט שיוצג על המסך..."></textarea>
+        <div class="hint" id="textHint"></div>
+      </div>
+      <div class="form-group" id="localGroup" style="display:none;">
+        <label class="form-label">קובץ ששמור על המסך</label>
+        <select class="form-select" id="fLocal" onchange="onLocalPick()"></select>
+        <div class="hint" id="localHint"></div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">שם (לתצוגה ברשימה)</label>
+        <input class="form-input" id="fTitle" type="text" placeholder="למשל: סרטון תדמית">
+      </div>
+      <div class="form-group" id="loopGroup" style="display:none;">
+        <label class="form-label">🔁 כמה פעמים לרוץ</label>
+        <select class="form-select" id="fLoops">
+          <option value="1">פעם אחת — ואז הפריט הבא</option>
+          <option value="2">2 פעמים</option>
+          <option value="3">3 פעמים</option>
+          <option value="5">5 פעמים</option>
+          <option value="10">10 פעמים</option>
+          <option value="0">בלופ בלי סוף</option>
+        </select>
+        <div class="hint">משך התצוגה נקבע לפי אורך הסרטון עצמו.</div>
+      </div>
+      <div class="form-group" id="durationGroup">
+        <label class="form-label">משך תצוגה (שניות)</label>
+        <input class="form-input" id="fDuration" type="number" min="0" placeholder="">
+        <div class="hint" id="durationHint"></div>
+      </div>
+      <div class="form-group" id="fitGroup">
+        <label class="form-label">התאמה למסך</label>
+        <select class="form-select" id="fFit">
+          <option value="">לפי ההגדרה הכללית</option>
+          <option value="contain">שלם (פסים שחורים)</option>
+          <option value="cover">מלא מסך (נחתך)</option>
+        </select>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal()">ביטול</button>
+        <button class="btn btn-primary" onclick="saveItem()" id="saveItemBtn">שמירה</button>
+      </div>
     </div>
   </div>
 </div>
@@ -257,15 +326,16 @@ document.getElementById('appTitle').textContent    = CONFIG.APP_NAME;
 document.getElementById('appSubtitle').textContent = CONFIG.APP_SUBTITLE;
 document.getElementById('sheetLink').href          = CONFIG.SHEETS_URL;
 
+// Order here = order of the tiles in the add-item picker.
 const TYPE_META = {
-  youtube: { emoji: '▶️', label: 'יוטיוב' },
-  video:   { emoji: '🎬', label: 'וידאו' },
-  drive:   { emoji: '📁', label: 'גוגל דרייב' },
-  slide:   { emoji: '📝', label: 'שקופית' },
-  notice:  { emoji: '📢', label: 'הודעה' },
-  local:   { emoji: '💾', label: 'קובץ על המסך' },
-  website: { emoji: '🌐', label: 'אתר' },
-  image:   { emoji: '🖼️', label: 'תמונה' }
+  notice:  { emoji: '📢', label: 'הודעה למשרד',  desc: 'כותרת וטקסט על רקע מעוצב' },
+  slide:   { emoji: '📝', label: 'שקופית טקסט',  desc: 'טקסט גדול במרכז המסך' },
+  youtube: { emoji: '▶️', label: 'יוטיוב',        desc: 'קישור לסרטון או שידור חי' },
+  website: { emoji: '🌐', label: 'אתר',           desc: 'כל כתובת אינטרנט' },
+  image:   { emoji: '🖼️', label: 'תמונה',         desc: 'קישור לקובץ תמונה' },
+  video:   { emoji: '🎬', label: 'קובץ וידאו',    desc: 'קישור ישיר לקובץ mp4' },
+  local:   { emoji: '💾', label: 'קובץ מהמסך',    desc: 'קובץ ששמור על הקיוסק עצמו' },
+  drive:   { emoji: '📁', label: 'גוגל דרייב',    desc: 'לרוב נחסם — עדיף יוטיוב' }
 };
 
 // File names the kiosk reported in its last heartbeat.
@@ -274,6 +344,7 @@ let kioskFiles = [];
 let items = [];
 let settings = null;
 let editingId = null;
+let currentType = null;   // the type chosen in the add/edit modal
 
 warmupServer();
 
@@ -301,6 +372,70 @@ async function loadAll() {
   fillSettings();
 }
 
+// Refresh state from the server without touching the loading screen or the
+// settings inputs (the user might be typing in them).
+async function loadAllQuiet() {
+  if (drag) return;                    // never fight an active drag
+  try {
+    const res = await apiCall('getPlaylist');
+    if (!res.success) return;
+    if (pendingOps > 0) return;        // stale — newer writes are still in flight
+    items = res.items;
+    settings = res.settings;
+    renderList();
+  } catch (_) {}
+}
+
+// ── Optimistic write queue ─────────────────────────────────
+// UI updates immediately; writes run one after another in the background so
+// the sheet is never hit by racing requests. On failure the caller's
+// `onError` reverts (or reloads) and the user sees an error toast.
+
+let pendingOps = 0;
+let opQueue = Promise.resolve();
+let reloadTimer = null;
+
+function enqueue(run, onError) {
+  pendingOps++;
+  updateSyncChip();
+  opQueue = opQueue.then(async () => {
+    try {
+      await run();
+    } catch (e) {
+      showToast(e.message, 'error', 6000);
+      if (onError) onError(e);
+    } finally {
+      pendingOps--;
+      updateSyncChip();
+      if (pendingOps === 0) scheduleQuietReload();
+    }
+  });
+  return opQueue;
+}
+
+// Once the queue drains, reconcile with the server truth after a beat.
+function scheduleQuietReload() {
+  clearTimeout(reloadTimer);
+  reloadTimer = setTimeout(() => { if (pendingOps === 0) loadAllQuiet(); }, 1500);
+}
+
+let syncChipTimer = null;
+function updateSyncChip() {
+  const el = document.getElementById('syncChip');
+  if (!el) return;
+  clearTimeout(syncChipTimer);
+  if (pendingOps > 0) {
+    el.className = 'sync-chip';
+    el.innerHTML = '<span class="sync-spinner"></span> שומר...';
+  } else {
+    el.className = 'sync-chip saved';
+    el.textContent = '✓ נשמר';
+    syncChipTimer = setTimeout(() => { el.textContent = ''; }, 2500);
+  }
+}
+
+function isTemp(id) { return String(id).indexOf('tmp-') === 0; }
+
 // ── Playlist list ──────────────────────────────────────────
 
 function renderList() {
@@ -316,11 +451,14 @@ function renderList() {
   el.innerHTML = items.map((it, i) => {
     const meta = TYPE_META[it.type] || TYPE_META.website;
     const dur = durationLabel(it);
+    const dis = it.pending ? 'disabled' : '';
     return `
-    <div class="pl-item ${it.active ? '' : 'inactive'}">
+    <div class="pl-item ${it.active ? '' : 'inactive'}${it.pending ? ' pending' : ''}" data-id="${it.id}">
       <div class="pl-top">
+        <span class="drag-handle" title="גרירה לשינוי סדר">⠿</span>
         <span class="pl-emoji">${meta.emoji}</span>
         <span class="pl-title">${esc(it.title)}</span>
+        ${it.pending ? '<span class="badge">⏳ שומר...</span>' : ''}
         ${it.active ? '' : '<span class="badge badge-off">מושבת</span>'}
         ${it.type === 'local' && kioskFiles.length && kioskFiles.indexOf(it.url) === -1
           ? '<span class="badge badge-off">הקובץ לא על המסך</span>' : ''}
@@ -332,9 +470,9 @@ function renderList() {
         <span class="pl-meta">${meta.label} · ${dur}${it.fit ? ' · ' + (it.fit === 'cover' ? 'מלא מסך' : 'שלם') : ''}</span>
         <button class="icon-btn" title="למעלה" onclick="move('${it.id}','up')" ${i === 0 ? 'disabled' : ''}>▲</button>
         <button class="icon-btn" title="למטה" onclick="move('${it.id}','down')" ${i === items.length - 1 ? 'disabled' : ''}>▼</button>
-        <button class="icon-btn" title="${it.active ? 'השבתה' : 'הפעלה'}" onclick="toggleActive('${it.id}', ${it.active})">${it.active ? '⏸' : '▶'}</button>
-        <button class="icon-btn" title="עריכה" onclick="openEditModal('${it.id}')">✏️</button>
-        <button class="icon-btn" title="מחיקה" onclick="removeItem('${it.id}')">🗑️</button>
+        <button class="icon-btn" title="${it.active ? 'השבתה' : 'הפעלה'}" onclick="toggleActive('${it.id}')" ${dis}>${it.active ? '⏸' : '▶'}</button>
+        <button class="icon-btn" title="עריכה" onclick="openEditModal('${it.id}')" ${dis}>✏️</button>
+        <button class="icon-btn" title="מחיקה" onclick="removeItem('${it.id}')" ${dis}>🗑️</button>
       </div>
     </div>`;
   }).join('');
@@ -371,58 +509,188 @@ function esc(s) {
                   .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-async function move(id, dir) {
-  try {
-    const res = await apiCall('moveItem', { id, dir });
-    if (!res.success) return showToast(res.message, 'error');
-    await loadAll();
-  } catch (e) { showToast(e.message, 'error'); }
+// ── Reordering (arrows + drag) — optimistic ────────────────
+
+function move(id, dir) {
+  const idx = items.findIndex(x => x.id === id);
+  const j = dir === 'up' ? idx - 1 : idx + 1;
+  if (idx === -1 || j < 0 || j >= items.length) return;
+  const [it] = items.splice(idx, 1);
+  items.splice(j, 0, it);
+  renderList();
+  persistOrder();
 }
 
-async function toggleActive(id, current) {
-  try {
-    const res = await apiCall('updateItem', { id, active: String(!current) });
-    if (!res.success) return showToast(res.message, 'error');
-    showToast(current ? 'הפריט הושבת' : 'הפריט הופעל', 'success');
-    await loadAll();
-  } catch (e) { showToast(e.message, 'error'); }
+// Collapses rapid reorders: only the newest order is actually written.
+let orderDirty = false;
+function persistOrder() {
+  orderDirty = true;
+  enqueue(async () => {
+    if (!orderDirty) return;
+    orderDirty = false;
+    // Temp ids aren't in the sheet yet; by the time this op runs the queue
+    // has usually already replaced them with real ids (FIFO), so this
+    // filter only matters if the add itself failed.
+    const ids = items.filter(i => !isTemp(i.id)).map(i => i.id).join(',');
+    const res = await apiCall('reorderItems', { ids });
+    if (!res.success) {
+      throw new Error(/Unknown action/i.test(res.message || '')
+        ? 'כדי לשמור סדר בגרירה צריך לפרוס גרסה חדשה של ה־Apps Script'
+        : (res.message || 'שגיאה בשמירת הסדר'));
+    }
+  }, () => loadAllQuiet());
 }
 
-async function removeItem(id) {
+// ── Drag & drop ────────────────────────────────────────────
+// Pointer-events based so it works with both mouse and touch. The original
+// element stays in the list as a ghost while a fixed-position clone follows
+// the finger; crossing another item's midpoint moves the ghost.
+
+let drag = null;
+const listEl = document.getElementById('playlist');
+
+listEl.addEventListener('pointerdown', e => {
+  const handle = e.target.closest('.drag-handle');
+  if (!handle || !e.isPrimary) return;
+  const itemEl = handle.closest('.pl-item');
+  if (!itemEl) return;
+  e.preventDefault();
+  startDrag(itemEl, e);
+});
+
+function startDrag(el, e) {
+  const rect = el.getBoundingClientRect();
+  const clone = el.cloneNode(true);
+  clone.classList.add('drag-clone');
+  clone.classList.remove('drag-ghost');
+  clone.style.width = rect.width + 'px';
+  clone.style.left = rect.left + 'px';
+  clone.style.top = rect.top + 'px';
+  document.body.appendChild(clone);
+  el.classList.add('drag-ghost');
+  document.body.classList.add('drag-active');
+  drag = { el, clone, dy: e.clientY - rect.top, lastY: e.clientY };
+  document.addEventListener('pointermove', onDragMove);
+  document.addEventListener('pointerup', endDrag);
+  document.addEventListener('pointercancel', endDrag);
+  requestAnimationFrame(dragFrame);
+}
+
+function onDragMove(e) {
+  if (!drag) return;
+  e.preventDefault();
+  drag.lastY = e.clientY;
+  drag.clone.style.top = (e.clientY - drag.dy) + 'px';
+  positionGhost(e.clientY);
+}
+
+// The rAF loop only handles edge auto-scroll, so the list keeps scrolling
+// (and the ghost keeps following) even while the finger stands still.
+function dragFrame() {
+  if (!drag) return;
+  const y = drag.lastY;
+  const margin = 70;
+  if (y < margin) window.scrollBy(0, -12);
+  else if (y > window.innerHeight - margin) window.scrollBy(0, 12);
+  positionGhost(y);
+  requestAnimationFrame(dragFrame);
+}
+
+function positionGhost(y) {
+  const siblings = Array.from(listEl.querySelectorAll('.pl-item:not(.drag-ghost)'));
+  for (const sib of siblings) {
+    const r = sib.getBoundingClientRect();
+    if (y < r.top + r.height / 2) {
+      if (sib.previousElementSibling !== drag.el) listEl.insertBefore(drag.el, sib);
+      return;
+    }
+  }
+  const last = listEl.querySelector('.pl-item:last-child');
+  if (last !== drag.el) listEl.appendChild(drag.el);
+}
+
+function endDrag() {
+  if (!drag) return;
+  document.removeEventListener('pointermove', onDragMove);
+  document.removeEventListener('pointerup', endDrag);
+  document.removeEventListener('pointercancel', endDrag);
+  drag.clone.remove();
+  drag.el.classList.remove('drag-ghost');
+  document.body.classList.remove('drag-active');
+
+  const before = items.map(i => i.id).join(',');
+  const domIds = Array.from(listEl.querySelectorAll('.pl-item')).map(n => n.dataset.id);
+  items.sort((a, b) => domIds.indexOf(a.id) - domIds.indexOf(b.id));
+  drag = null;
+  renderList();
+  if (items.map(i => i.id).join(',') !== before) persistOrder();
+}
+
+// ── Toggle / delete — optimistic ───────────────────────────
+
+function toggleActive(id) {
   const it = items.find(x => x.id === id);
-  if (!confirm('למחוק את "' + (it ? it.title : '') + '" מהפלייליסט?')) return;
-  try {
+  if (!it || it.pending) return;
+  it.active = !it.active;
+  renderList();
+  showToast(it.active ? 'הפריט הופעל' : 'הפריט הושבת', 'success');
+  enqueue(async () => {
+    const res = await apiCall('updateItem', { id, active: String(it.active) });
+    if (!res.success) throw new Error(res.message || 'שגיאה');
+  }, () => { it.active = !it.active; renderList(); });
+}
+
+function removeItem(id) {
+  const idx = items.findIndex(x => x.id === id);
+  if (idx === -1 || items[idx].pending) return;
+  const it = items[idx];
+  if (!confirm('למחוק את "' + it.title + '" מהפלייליסט?')) return;
+  items.splice(idx, 1);
+  renderList();
+  showToast('נמחק', 'success');
+  enqueue(async () => {
     const res = await apiCall('deleteItem', { id });
-    if (!res.success) return showToast(res.message, 'error');
-    showToast('נמחק', 'success');
-    await loadAll();
-  } catch (e) { showToast(e.message, 'error'); }
+    if (!res.success) throw new Error(res.message || 'שגיאה');
+  }, () => {
+    items.splice(Math.min(idx, items.length), 0, it);
+    renderList();
+  });
 }
 
 // ── Add / Edit modal ───────────────────────────────────────
+// Step 1 picks the item type; step 2 shows only the fields relevant to it.
+
+(function buildTypeGrid() {
+  document.getElementById('typeGrid').innerHTML = Object.keys(TYPE_META).map(t => {
+    const m = TYPE_META[t];
+    return `
+    <button type="button" class="type-tile" onclick="pickType('${t}')">
+      <span class="t-emoji">${m.emoji}</span>
+      <span class="t-label">${m.label}</span>
+      <span class="t-desc">${m.desc}</span>
+    </button>`;
+  }).join('');
+})();
 
 function openAddModal() {
   editingId = null;
-  document.getElementById('modalTitle').textContent = 'הוספת פריט';
+  currentType = null;
   document.getElementById('fUrl').value = '';
   document.getElementById('fTitle').value = '';
-  document.getElementById('fType').value = 'website';
   document.getElementById('fDuration').value = '';
   document.getElementById('fLoops').value = '1';
   document.getElementById('fFit').value = '';
   document.getElementById('fText').value = '';
-  updateDurationHint();
+  showTypeStep();
   document.getElementById('itemModal').classList.add('open');
 }
 
 function openEditModal(id) {
   const it = items.find(x => x.id === id);
-  if (!it) return;
+  if (!it || it.pending) return;
   editingId = id;
-  document.getElementById('modalTitle').textContent = 'עריכת פריט';
   document.getElementById('fUrl').value = it.url;
   document.getElementById('fTitle').value = it.title;
-  document.getElementById('fType').value = it.type;
   document.getElementById('fDuration').value = it.duration || '';
   const loops = String(loopsOf(it));
   const loopsSel = document.getElementById('fLoops');
@@ -433,8 +701,39 @@ function openEditModal(id) {
   loopsSel.value = loops;
   document.getElementById('fFit').value = it.fit || '';
   document.getElementById('fText').value = it.text || '';
-  updateDurationHint();
+  setType(it.type);
+  showFormStep();
   document.getElementById('itemModal').classList.add('open');
+}
+
+function showTypeStep() {
+  document.getElementById('modalTitle').textContent = 'מה להוסיף למסך?';
+  document.getElementById('typeStep').style.display = '';
+  document.getElementById('formStep').style.display = 'none';
+}
+
+function showFormStep() {
+  document.getElementById('modalTitle').textContent = editingId ? 'עריכת פריט' : 'הוספת פריט';
+  document.getElementById('typeStep').style.display = 'none';
+  document.getElementById('formStep').style.display = '';
+}
+
+function pickType(t) {
+  setType(t);
+  showFormStep();
+  // Put the cursor where the user will type first.
+  const focusEl = t === 'local' ? document.getElementById('fLocal')
+                : isTextItem(t) ? document.getElementById('fTitle')
+                : document.getElementById('fUrl');
+  setTimeout(() => focusEl.focus(), 50);
+}
+
+function setType(t) {
+  currentType = t;
+  const meta = TYPE_META[t] || TYPE_META.website;
+  document.getElementById('chipEmoji').textContent = meta.emoji;
+  document.getElementById('chipLabel').textContent = meta.label;
+  updateTypeFields();
 }
 
 function closeModal() {
@@ -456,25 +755,31 @@ function driveId(url) {
   return m ? m[1] : null;
 }
 
+// If a pasted address clearly belongs to another type (a YouTube link while
+// "website" is chosen, say) — switch for the user instead of failing later.
 function autoDetectType() {
   if (editingId) return; // don't fight the user while editing
   const url = document.getElementById('fUrl').value.trim();
   if (!url) return;
-  document.getElementById('fType').value = detectType(url);
-  updateDurationHint();
+  const det = detectType(url);
+  const urlTypes = ['website', 'youtube', 'video', 'drive', 'image'];
+  if (det !== currentType && det !== 'website' && urlTypes.indexOf(currentType) !== -1) {
+    setType(det);
+    showToast('הכתובת זוהתה כ' + TYPE_META[det].label + ' — הסוג עודכן', 'info');
+  }
 }
 
-function updateDurationHint() {
-  const type = document.getElementById('fType').value;
+function updateTypeFields() {
+  const type = currentType;
   const durHint = document.getElementById('durationHint');
   const typeHint = document.getElementById('typeHint');
   const isVideo = isVideoItem(type);
+  const isText = isTextItem(type);
   document.getElementById('loopGroup').style.display = isVideo ? '' : 'none';
   // Websites reflow to the screen, so the fit option is meaningless for them.
   document.getElementById('fitGroup').style.display =
-    (type === 'website' || isTextItem(type)) ? 'none' : '';
+    (type === 'website' || isText) ? 'none' : '';
   // A file on the screen is chosen from a list, not typed as an address.
-  const isText = isTextItem(type);
   document.getElementById('localGroup').style.display = type === 'local' ? '' : 'none';
   document.getElementById('textGroup').style.display  = isText ? '' : 'none';
   document.getElementById('urlGroup').style.display   = (type === 'local' || isText) ? 'none' : '';
@@ -536,10 +841,12 @@ function ytId(url) {
   return m ? m[1] : null;
 }
 
-async function saveItem() {
+// Optimistic save: the list updates and the modal closes immediately; the
+// actual write runs through the queue with a ⏳ marker on the item.
+function saveItem() {
   const url = document.getElementById('fUrl').value.trim();
   const title = document.getElementById('fTitle').value.trim();
-  const type = document.getElementById('fType').value;
+  const type = currentType;
   const duration = parseInt(document.getElementById('fDuration').value) || 0;
   const isVideo = isVideoItem(type);
   const isText = isTextItem(type);
@@ -555,22 +862,50 @@ async function saveItem() {
   if (type === 'youtube' && !ytId(url)) return showToast('כתובת היוטיוב לא תקינה', 'warning');
   if (type === 'drive' && !driveId(url)) return showToast('לא זוהה קובץ בכתובת הדרייב — העתיקו את קישור השיתוף המלא', 'warning');
 
-  const btn = document.getElementById('saveItemBtn');
-  btn.disabled = true;
-  try {
-    const res = editingId
-      ? await apiCall('updateItem', { id: editingId, title, type, url, duration, loops, fit, text })
-      : await apiCall('addItem', { title, type, url, duration, loops, fit, text });
-    if (!res.success) return showToast(res.message, 'error');
+  const loopsNum = parseInt(loops) >= 0 ? parseInt(loops) : 1;
+  const payload = { title, type, url, duration, loops, fit, text };
+
+  if (editingId) {
+    const it = items.find(x => x.id === editingId);
+    const id = editingId;
+    if (!it) return;
+    const backup = { ...it };
+    Object.assign(it, {
+      title, type, url, duration, fit, text,
+      loops: loopsNum, loop: loopsNum === 0, pending: true
+    });
     closeModal();
+    renderList();
     showToast('נשמר ✓', 'success');
-    await loadAll();
-    if (type === 'website') checkEmbedWarn(url);
-  } catch (e) {
-    showToast(e.message, 'error');
-  } finally {
-    btn.disabled = false;
+    enqueue(async () => {
+      const res = await apiCall('updateItem', { id, ...payload });
+      if (!res.success) throw new Error(res.message || 'שגיאה');
+      it.pending = false;
+      renderList();
+    }, () => { Object.assign(it, backup, { pending: false }); renderList(); });
+  } else {
+    const it = {
+      id: 'tmp-' + Date.now(),
+      title, type, url, duration, fit, text,
+      loops: loopsNum, loop: loopsNum === 0,
+      active: true, pending: true
+    };
+    items.push(it);
+    closeModal();
+    renderList();
+    showToast('נוסף לפלייליסט ✓', 'success');
+    enqueue(async () => {
+      const res = await apiCall('addItem', payload);
+      if (!res.success) throw new Error(res.message || 'שגיאה');
+      it.id = res.id;
+      it.pending = false;
+      renderList();
+    }, () => {
+      const i = items.indexOf(it);
+      if (i > -1) { items.splice(i, 1); renderList(); }
+    });
   }
+  if (type === 'website') checkEmbedWarn(url);
 }
 
 async function checkEmbedWarn(url) {
@@ -597,29 +932,35 @@ function fillSettings() {
   document.getElementById('setGap').value = settings.gapSeconds === undefined ? 10 : settings.gapSeconds;
 }
 
-async function saveSettings() {
-  const btn = document.getElementById('saveSettingsBtn');
-  btn.disabled = true;
-  try {
-    const res = await apiCall('updateSettings', {
-      kioskName: document.getElementById('setName').value.trim(),
-      refreshSeconds: document.getElementById('setRefresh').value,
-      defaultDuration: document.getElementById('setDefault').value,
-      dailyReloadHour: document.getElementById('setReloadHour').value,
-      muted: String(document.getElementById('setMuted').checked),
-      showClock: String(document.getElementById('setClock').checked),
-      videoFit: document.getElementById('setVideoFit').value,
-      idleMessage: document.getElementById('setIdleMessage').value.trim(),
-      gapSeconds: document.getElementById('setGap').value
-    });
-    if (!res.success) return showToast(res.message, 'error');
-    showToast('ההגדרות נשמרו — יחולו על המסך בבדיקת העדכונים הבאה', 'success');
-    await loadAll();
-  } catch (e) {
-    showToast(e.message, 'error');
-  } finally {
-    btn.disabled = false;
+function saveSettings() {
+  const payload = {
+    kioskName: document.getElementById('setName').value.trim(),
+    refreshSeconds: document.getElementById('setRefresh').value,
+    defaultDuration: document.getElementById('setDefault').value,
+    dailyReloadHour: document.getElementById('setReloadHour').value,
+    muted: String(document.getElementById('setMuted').checked),
+    showClock: String(document.getElementById('setClock').checked),
+    videoFit: document.getElementById('setVideoFit').value,
+    idleMessage: document.getElementById('setIdleMessage').value.trim(),
+    gapSeconds: document.getElementById('setGap').value
+  };
+  // Reflect locally right away (duration labels in the list use these).
+  if (settings) {
+    settings.kioskName = payload.kioskName;
+    settings.refreshSeconds = parseInt(payload.refreshSeconds) || settings.refreshSeconds;
+    settings.defaultDuration = parseInt(payload.defaultDuration) || settings.defaultDuration;
+    settings.muted = payload.muted === 'true';
+    settings.showClock = payload.showClock === 'true';
+    settings.videoFit = payload.videoFit;
+    settings.idleMessage = payload.idleMessage;
+    settings.gapSeconds = parseInt(payload.gapSeconds) || 0;
+    renderList();
   }
+  showToast('ההגדרות נשמרו — יחולו על המסך בבדיקת העדכונים הבאה', 'success');
+  enqueue(async () => {
+    const res = await apiCall('updateSettings', payload);
+    if (!res.success) throw new Error(res.message || 'שגיאה');
+  }, () => loadAll().catch(() => {}));
 }
 
 // ── Kiosk status & control ─────────────────────────────────
@@ -649,7 +990,7 @@ async function refreshKiosk() {
       try { st = await apiCall('getStatus'); } catch (_) { continue; }
       if (st && st.boot && st.boot !== bootBefore) {
         showToast('המסך התרענן ✓', 'success');
-        await loadAll();
+        loadAllQuiet();
         return;
       }
     }
@@ -670,7 +1011,7 @@ async function refreshStatus() {
     if (!res.success) throw new Error(res.message);
     if (Array.isArray(res.files)) {
       kioskFiles = res.files;
-      if (document.getElementById('fType').value === 'local' &&
+      if (currentType === 'local' &&
           document.getElementById('itemModal').classList.contains('open')) {
         fillLocalPicker();
       }

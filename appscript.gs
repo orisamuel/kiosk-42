@@ -278,6 +278,39 @@ function moveItem(id, dir) {
   }
 }
 
+// Persist a complete new display order in one call (used by drag & drop).
+// `idsCsv` is a comma-separated list of item ids in the desired order.
+// Rows not mentioned keep their relative position after the listed ones.
+function reorderItems(idsCsv) {
+  try {
+    const sheet = ensureSheet('playlist', PLAYLIST_HEADERS);
+    const data = sheet.getDataRange().getValues();
+    if (data.length <= 1) return { success: true };
+    const wanted = String(idsCsv || '').split(',').filter(String);
+    if (!wanted.length) return { success: false, message: 'לא התקבלה רשימת פריטים' };
+    const pos = {};
+    wanted.forEach((id, i) => { pos[id] = i + 1; });
+    // Rows missing from the list keep their current relative order, after the listed ones.
+    const rows = [];
+    for (let i = 1; i < data.length; i++) {
+      if (data[i][0]) rows.push({ id: String(data[i][0]), order: parseFloat(data[i][6]) || 0 });
+    }
+    rows.sort((a, b) => a.order - b.order);
+    let next = wanted.length;
+    rows.forEach(r => { if (!(r.id in pos)) pos[r.id] = ++next; });
+    // One batched write for the whole order column — much faster than per-cell writes.
+    const colValues = [];
+    for (let i = 1; i < data.length; i++) {
+      const id = String(data[i][0]);
+      colValues.push([pos[id] !== undefined ? pos[id] : (parseFloat(data[i][6]) || 0)]);
+    }
+    sheet.getRange(2, 7, colValues.length, 1).setValues(colValues);
+    return { success: true };
+  } catch (e) {
+    return { success: false, message: e.toString() };
+  }
+}
+
 // ============================================================
 // TABLE: SETTINGS
 // Schema: key(0), value(1) — key/value store, human-editable in the sheet
@@ -455,6 +488,8 @@ function doPost(e) {
         return jsonResponse(deleteItem(p.id));
       case 'moveItem':
         return jsonResponse(moveItem(p.id, p.dir));
+      case 'reorderItems':
+        return jsonResponse(reorderItems(p.ids));
 
       // ── Settings & kiosk control ─────────────────────────
       case 'updateSettings':
