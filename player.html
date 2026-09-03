@@ -187,6 +187,27 @@
   }
   .slide .bubble .when { color: #E5187F; }
 
+  /* ── Touch mode ──
+     A kiosk is deliberately untouchable: #stage takes no pointer events at all,
+     and the gesture layer above it turns taps into playlist moves. Touch mode
+     hands the screen over to the content for a few minutes — taps, typing and
+     scrolling reach the site — and freezes the rotation so nothing replaces
+     what someone is in the middle of. Used to sign in to an embedded site. */
+  #stage.touch { pointer-events: auto; }
+  #gestures.through { pointer-events: none; }
+  #touchBar {
+    position: fixed; bottom: 0; left: 0; right: 0; z-index: 45;
+    display: none; align-items: center; justify-content: space-between;
+    gap: 2vmin; padding: 1.6vmin 2.4vmin;
+    background: rgba(13,15,20,0.94); color: #F1F5F9;
+    font-family: inherit; font-size: 2.2vmin; font-weight: 700;
+    direction: rtl; cursor: auto;
+    box-shadow: 0 -0.5vmin 2vmin rgba(0,0,0,0.5);
+  }
+  #touchBar.show { display: flex; }
+  #touchBar .tbText { flex: 1; min-width: 0; }
+  #touchBar .tbClock { color: #FBBF24; font-variant-numeric: tabular-nums; }
+
   /* Flashes for half a second when a swipe moves the playlist along. */
   #swipeHint {
     position: fixed; inset: 0; z-index: 20;
@@ -295,6 +316,13 @@
      an iframe or a video owns the screen; kiosk content isn't interactive. -->
 <div id="gestures"></div>
 
+<!-- Shown only in touch mode: the way back out, and how long is left. -->
+<div id="touchBar">
+  <span class="tbText">🖐 מצב נגיעה — אפשר ללחוץ, להקליד ולגלול באתר. הסבב עוצר.</span>
+  <span class="tbClock" id="tbClock"></span>
+  <button class="fBtn" onclick="setTouchMode(false)">יציאה ✕</button>
+</div>
+
 <div id="filesCorner"></div>
 
 <script>
@@ -311,6 +339,8 @@ const SWIPE_MIN_PX      = 70;     // shorter than this is a tap, not a swipe
 const SWIPE_MAX_MS      = 900;    // a slow drag isn't a swipe either
 const FAIL_NOTE_TTL_MS  = 15 * 60 * 1000;   // how long a failure stays reported
 const REVEAL_WAIT_MS    = 2500;   // hold the waiting board until playback rolls
+const LONG_PRESS_MS     = 700;    // press-and-hold that hands the screen over
+const TOUCH_IDLE_MS     = 3 * 60 * 1000;  // never leave a public screen unlocked
 
 // ════════════════════════════════════════════════════════════
 // State
@@ -347,6 +377,12 @@ const S = {
   lastFail: null,       // { title, reason } of the last item that wouldn't play
   loopExitFor: null,    // item id whose "leave after N passes" timer is armed
   revealRoll: null,     // poll waiting for the picture to actually move
+  touchMode: false,     // screen handed over to the content (see setTouchMode)
+  touchIdle: null,
+  touchTick: null,
+  touchUntil: 0,
+  longPress: null,
+  pressFired: false,
   filesAutoClose: null,
   preload: null,        // { id, el|img, blobUrl } — next item, warmed in advance
   bootId: String(Date.now()) + '-' + Math.random().toString(36).slice(2, 7)
@@ -497,6 +533,10 @@ function applyData(res, fromCache) {
   setIdleMessage(settings.idleMessage || '');
   updateClockVisibility();
 
+  // Somebody is working on the screen. Leave the content exactly where it is —
+  // the next poll after they step away picks any change up.
+  if (S.touchMode) return;
+
   const active = (res.items || []).filter(i => i.active);
 
   if (!active.length) {
@@ -575,6 +615,8 @@ function gapMs() {
 }
 
 function renderItem(item) {
+  // New content means whatever someone was doing is over.
+  if (S.touchMode) setTouchMode(false);
   stopCurrent();
   S.currentId = item.id;
   S.currentTitle = item.title;
@@ -1457,10 +1499,32 @@ function goFullscreen() {
 
   layer.addEventListener('pointerdown', e => {
     sx = e.clientX; sy = e.clientY; sAt = e.timeStamp || Date.now();
+    // Press and hold: hand the screen over to the content.
+    S.pressFired = false;
+    clearTimeout(S.longPress);
+    S.longPress = setTimeout(() => {
+      if (S.filesOpen) return;
+      S.pressFired = true;
+      swipeHintText('🖐');
+      setTouchMode(true);
+    }, LONG_PRESS_MS);
   }, { passive: true });
 
+  // A finger that travels is a swipe, not a hold.
+  layer.addEventListener('pointermove', e => {
+    if (Math.abs(e.clientX - sx) > 20 || Math.abs(e.clientY - sy) > 20) {
+      clearTimeout(S.longPress);
+    }
+  }, { passive: true });
+  layer.addEventListener('pointercancel', () => clearTimeout(S.longPress), { passive: true });
+
   layer.addEventListener('pointerup', e => {
+    clearTimeout(S.longPress);
+    if (S.pressFired) { S.pressFired = false; return; }   // the hold already acted
     if (S.filesOpen) return;                    // the manager has its own buttons
+    // In touch mode this layer is click-through, so a finger never gets here —
+    // but nothing else may move the playlist while the site is in use either.
+    if (S.touchMode) return;
     const now = e.timeStamp || Date.now();
     const dx = e.clientX - sx, dy = e.clientY - sy;
 
@@ -1481,10 +1545,52 @@ function goFullscreen() {
   }, { passive: true });
 }
 
+// ── Touch mode ──
+// Press and hold anywhere to let the content itself take the taps: the stage
+// starts accepting pointer events, the gesture layer steps aside, and the
+// rotation is frozen so a sign-in isn't swept away mid-typing. It always ends
+// by itself, because a wall screen left interactive is a wall screen anyone
+// can wander up to and poke.
+function setTouchMode(on) {
+  if (S.touchMode === !!on) return;
+  S.touchMode = !!on;
+  $('stage').classList.toggle('touch', S.touchMode);
+  $('gestures').classList.toggle('through', S.touchMode);
+  $('touchBar').classList.toggle('show', S.touchMode);
+  document.body.style.cursor = S.touchMode ? 'auto' : 'none';
+
+  clearTimeout(S.touchIdle);
+  clearInterval(S.touchTick);
+
+  if (S.touchMode) {
+    // Freeze the rotation — nothing may replace what is being worked on.
+    clearTimeout(S.advanceTimer); S.advanceTimer = null;
+    clearTimeout(S.safetyTimer);  S.safetyTimer = null;
+    S.touchUntil = Date.now() + TOUCH_IDLE_MS;
+    S.touchIdle = setTimeout(() => setTouchMode(false), TOUCH_IDLE_MS);
+    S.touchTick = setInterval(drawTouchClock, 1000);
+    drawTouchClock();
+  } else {
+    // Hand the screen back and restart this item's clock from now. When
+    // renderItem is the caller the screen is already moving on, and S.currentId
+    // still names the OUTGOING item — so there is nothing here to re-arm.
+    const item = S.items[S.idx];
+    if (item && S.currentId === item.id) armTimers(item);
+  }
+}
+
+function drawTouchClock() {
+  const left = Math.max(0, Math.round((S.touchUntil - Date.now()) / 1000));
+  $('tbClock').textContent = 'יציאה אוטומטית בעוד ' +
+    Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0');
+}
+
 // Brief arrow so a swipe visibly registered, even mid-load.
-function swipeHint(forward) {
+function swipeHint(forward) { swipeHintText(forward ? '‹‹' : '››'); }
+
+function swipeHintText(txt) {
   const el = $('swipeHint');
-  el.textContent = forward ? '‹‹' : '››';
+  el.textContent = txt;
   el.classList.add('show');
   clearTimeout(S.swipeHintTimer);
   S.swipeHintTimer = setTimeout(() => el.classList.remove('show'), 500);
@@ -1510,7 +1616,13 @@ document.addEventListener('keydown', e => {
   }
   if (e.key === 'Escape' && S.filesOpen) { closeFiles(); return; }
   if (e.key === 'x' || e.key === 'X') { toggleFullscreen(); return; }
+  if (e.key === 't' || e.key === 'T') {
+    setTouchMode(!S.touchMode);
+    return;
+  }
+  if (e.key === 'Escape' && S.touchMode) { setTouchMode(false); return; }
   if (S.filesOpen) return;   // don't rotate content behind the manager
+  if (S.touchMode) return;   // keys belong to whatever is being used
   if (e.key === 'ArrowLeft' || e.key === ' ') jump(1);
   else if (e.key === 'ArrowRight') jump(-1);
 });
