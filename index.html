@@ -321,7 +321,7 @@
       </div>
       <div class="form-group" id="loopGroup" style="display:none;">
         <label class="form-label">🔁 כמה פעמים לרוץ</label>
-        <select class="form-select" id="fLoops">
+        <select class="form-select" id="fLoops" onchange="updateLoopHint()">
           <option value="1">פעם אחת — ואז הפריט הבא</option>
           <option value="2">2 פעמים</option>
           <option value="3">3 פעמים</option>
@@ -329,7 +329,7 @@
           <option value="10">10 פעמים</option>
           <option value="0">בלופ בלי סוף</option>
         </select>
-        <div class="hint">משך התצוגה נקבע לפי אורך הסרטון עצמו.</div>
+        <div class="hint" id="loopHint">משך התצוגה נקבע לפי אורך הסרטון עצמו.</div>
       </div>
       <div class="form-group" id="durationGroup">
         <label class="form-label">משך תצוגה (שניות)</label>
@@ -800,6 +800,7 @@ function openEditModal(id) {
   }
   loopsSel.value = loops;
   document.getElementById('fFit').value = it.fit || '';
+  updateLoopHint();
   document.getElementById('fText').value = it.text || '';
   document.getElementById('fHeading').value = it.heading || '';
   setType(it.type);
@@ -900,6 +901,7 @@ function updateTypeFields() {
   }
   if (isVideo) {
     durHint.textContent = 'ריק = לפי אורך הסרטון (מומלץ). מספר שניות = תקרה קשיחה, לשידור חי למשל.';
+    updateLoopHint();
   } else {
     const def = settings ? settings.defaultDuration : 60;
     durHint.textContent = 'ריק = ברירת המחדל (' + def + ' שניות)';
@@ -910,6 +912,24 @@ function updateTypeFields() {
     typeHint.textContent = '⚠ גוגל חוסמת הזרמת וידאו מדרייב לאתר אחר, ולכן סרטון כזה עלול להיתקע על כפתור פליי במסך. הדרך המומלצת: להעלות את הסרטון ליוטיוב כ-Unlisted ולהדביק את הקישור שלו כאן.';
   } else {
     typeHint.textContent = '';
+  }
+}
+
+// Repeats are seamless on a real video file (the browser loops it in about a
+// frame) but NOT on YouTube: its player reloads the video between passes, which
+// shows as a ~half-second stutter every time round. Measured, not guessed — so
+// say so before someone sets a YouTube clip to loop on a wall screen.
+function updateLoopHint() {
+  const el = document.getElementById('loopHint');
+  if (!el) return;
+  const loops = parseInt(document.getElementById('fLoops').value);
+  const base = 'משך התצוגה נקבע לפי אורך הסרטון עצמו.';
+  if (currentType === 'youtube' && loops !== 1) {
+    el.innerHTML = base + ' <span style="color:var(--danger);">⚠ יוטיוב טוען את הסרטון מחדש בין ' +
+      'חזרה לחזרה — תיראה קפיצה של כחצי שנייה בכל סבב. ללופ חלק לגמרי: לשמור את הסרטון ' +
+      'כקובץ על המסך (💾 קובץ מהמסך) — שם החזרה חלקה לחלוטין.</span>';
+  } else {
+    el.textContent = base;
   }
 }
 
