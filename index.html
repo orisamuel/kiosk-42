@@ -955,11 +955,17 @@ function fillLocalPicker() {
   onLocalPick();
 }
 
+function niceTitle(fileName) {
+  return String(fileName)
+    .replace(/\.[^.]+$/, '')          // drop the extension
+    .replace(/^(?:\d{8,}_)+/, '');    // drop stacked download timestamps
+}
+
 function onLocalPick() {
   const sel = document.getElementById('fLocal');
   document.getElementById('fUrl').value = sel.value;
   const title = document.getElementById('fTitle');
-  if (!title.value.trim() && sel.value) title.value = sel.value.replace(/\.[^.]+$/, '');
+  if (!title.value.trim() && sel.value) title.value = niceTitle(sel.value);
 }
 
 // Whether a file saved here will actually reach the screen — so nobody parks a
@@ -1053,6 +1059,9 @@ async function importLocalFiles(fileList_) {
     fillLocalPicker();
     const sel = document.getElementById('fLocal');
     sel.value = saved[0].name;
+    // Name it after the file just chosen, even if the dropdown had already
+    // auto-filled some other file's name into the title.
+    document.getElementById('fTitle').value = niceTitle(saved[0].name);
     onLocalPick();
     showToast('הקובץ נשמר על המכשיר — לחצו שמירה כדי להוסיף לפלייליסט', 'success', 6000);
     return;
@@ -1066,7 +1075,7 @@ async function importLocalFiles(fileList_) {
 function addLocalItem(name) {
   const it = {
     id: 'tmp-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
-    title: name.replace(/\.[^.]+$/, ''), type: 'local', url: name,
+    title: niceTitle(name), type: 'local', url: name,
     duration: 0, fit: '', text: '', heading: '',
     loops: 1, loop: false, active: true, pending: true
   };
