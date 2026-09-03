@@ -187,6 +187,22 @@
   }
   .slide .bubble .when { color: #E5187F; }
 
+  /* Flashes for half a second when a swipe moves the playlist along. */
+  #swipeHint {
+    position: fixed; inset: 0; z-index: 20;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16vmin; font-weight: 800; color: rgba(255,255,255,0.85);
+    text-shadow: 0 0 3vmin rgba(0,0,0,0.6);
+    opacity: 0; transition: opacity 0.18s; pointer-events: none;
+  }
+  #swipeHint.show { opacity: 1; }
+
+  /* Transparent gesture catcher above the content — see the markup below. */
+  #gestures {
+    position: fixed; inset: 0; z-index: 30;
+    touch-action: none; background: transparent;
+  }
+
   /* ── On-screen file manager ── */
   #filesCorner {
     position: fixed; top: 0; left: 0; width: 12vmin; height: 12vmin;
@@ -204,7 +220,7 @@
     background: #161b24; border: 1px solid rgba(255,255,255,0.12);
     border-radius: 20px; padding: 3vmin; color: #F1F5F9;
   }
-  #filesHead { display: flex; align-items: flex-start; justify-content: space-between; gap: 2vmin; }
+  #filesHead { display: flex; align-items: flex-start; justify-content: space-between; gap: 2vmin; flex-wrap: wrap; }
   #filesTitle { font-size: 3.4vmin; font-weight: 800; color: #FBBF24; }
   #filesQuota { font-size: 2vmin; color: #94A3B8; margin-top: 0.5vmin; }
   .fBtn {
@@ -247,6 +263,7 @@
 
 <div id="errBoard"></div>
 
+<div id="swipeHint"></div>
 <div id="clockPill">--:--</div>
 <div id="offlineDot"></div>
 
@@ -261,6 +278,7 @@
         <div id="filesTitle">קבצים על המסך</div>
         <div id="filesQuota"></div>
       </div>
+      <a class="fBtn" href="index.html" style="text-decoration:none;">עמוד הניהול ›</a>
       <button class="fBtn" onclick="closeFiles()">סגירה ✕</button>
     </div>
     <label class="fPick">
@@ -271,6 +289,11 @@
     <div id="filesList"></div>
   </div>
 </div>
+
+<!-- Catches the touch gestures (double tap = fullscreen, horizontal swipe =
+     next/previous item). It sits above the content so a swipe still works while
+     an iframe or a video owns the screen; kiosk content isn't interactive. -->
+<div id="gestures"></div>
 
 <div id="filesCorner"></div>
 
@@ -284,6 +307,9 @@ const DRIVE_TRY_TIMEOUT = 3000;   // per Drive URL strategy
 const SINGLE_RETRY_MS   = 20000;  // lone broken item: retry instead of rotating
 const MAX_NATIVE_PX     = 2560;   // largest player width we ask the device to render
 const DOUBLE_TAP_MS     = 600;    // generous window: a finger on a wall-mounted screen
+const SWIPE_MIN_PX      = 70;     // shorter than this is a tap, not a swipe
+const SWIPE_MAX_MS      = 900;    // a slow drag isn't a swipe either
+const FAIL_NOTE_TTL_MS  = 15 * 60 * 1000;   // how long a failure stays reported
 
 // ════════════════════════════════════════════════════════════
 // State
@@ -316,18 +342,36 @@ const S = {
   objectUrl: null,      // blob URL of the local file on screen (revoked on switch)
   localNames: [],       // files stored on this device, reported in the heartbeat
   filesOpen: false,
+  swipeHintTimer: null,
+  lastFail: null,       // { title, reason } of the last item that wouldn't play
   filesAutoClose: null,
   preload: null,        // { id, el|img, blobUrl } — next item, warmed in advance
   bootId: String(Date.now()) + '-' + Math.random().toString(36).slice(2, 7)
 };
 
 const CACHE_KEY = 'kioskCache';
+// Names of the on-device file store. Declared up here, not next to the file
+// code below: boot() scans the store, and a `const` further down the file is
+// still in its temporal dead zone at that point — reading it would throw and
+// the screen would report "no files" for the rest of its life.
+const DB_NAME = 'kioskFiles', DB_STORE = 'files';
+// Same-origin breadcrumb: the admin page reads this to tell whether it is being
+// opened on the kiosk device itself, and can then offer a plain file picker
+// that writes straight into this device's storage.
+const HERE_KEY  = 'kioskPlayerHere';
 const $ = id => document.getElementById(id);
+
+function markPlayerHere() {
+  try {
+    localStorage.setItem(HERE_KEY, JSON.stringify({ ts: Date.now(), boot: S.bootId }));
+  } catch (_) {}
+}
 
 // ════════════════════════════════════════════════════════════
 // Boot
 // ════════════════════════════════════════════════════════════
 (function boot() {
+  markPlayerHere();
   startClocks();
   requestWakeLock();
   goFullscreen();
@@ -354,8 +398,9 @@ const $ = id => document.getElementById(id);
 // Files stored on the kiosk itself
 // A file picked here is copied into the device's own storage (IndexedDB), so it
 // plays with no network, no upload and no size limit beyond the device's disk.
+// The admin panel writes to the very same store when it is opened on this
+// device, so a file added there shows up here with no extra step.
 // ════════════════════════════════════════════════════════════
-const DB_NAME = 'kioskFiles', DB_STORE = 'files';
 
 function idb() {
   return new Promise((resolve, reject) => {
@@ -395,12 +440,17 @@ async function refreshLocalNames() {
 // Polling — fetch playlist + report heartbeat
 // ════════════════════════════════════════════════════════════
 async function poll() {
+  // Re-read on every poll: the admin panel, opened on this device, may have
+  // added a file since the last round.
+  await refreshLocalNames();
   try {
     const res = await apiCall('getPlaylist', {
       current: S.currentTitle || 'מסך המתנה',
       // Tell the admin panel which files live on this screen, so items can be
       // pointed at them from the phone.
       files: S.localNames.slice(0, 25).join('|'),
+      // Last item that wouldn't play, so the panel can name the cause.
+      fail: failNote(),
       boot: S.bootId
     });
     // A non-JSON reply (Google error page during a redeploy) must never be
@@ -416,6 +466,7 @@ async function poll() {
   }
   $('offlineDot').classList.toggle('show', S.failStreak >= 3);
 
+  markPlayerHere();
   const sec = (S.settings && S.settings.refreshSeconds) || 60;
   clearTimeout(S.pollTimer);
   S.pollTimer = setTimeout(poll, Math.max(15, sec) * 1000);
@@ -476,10 +527,15 @@ function applyData(res, fromCache) {
 // ════════════════════════════════════════════════════════════
 // Rotation
 // ════════════════════════════════════════════════════════════
-function next() {
+function next() { advance(1); }
+function prev() { advance(-1); }
+
+// `step` is +1 for the next item, -1 for the previous one (swipe / arrow keys).
+function advance(step) {
   if (!S.items.length) { showStage(false); return; }
   const prevId = S.currentId;
-  S.idx = (S.idx + 1) % S.items.length;
+  const len = S.items.length;
+  S.idx = ((S.idx + step) % len + len) % len;
   const item = S.items[S.idx];
 
   // Single static item — don't flash-reload it, just re-arm the timer.
@@ -495,6 +551,13 @@ function next() {
   const gap = (prevId && S.items.length > 1) ? gapMs() : 0;
   S.revealAt = gap > 0 ? Date.now() + gap : 0;
   renderItem(item);
+}
+
+// The failure note for the heartbeat. Stale notes are dropped so a problem
+// that was fixed hours ago doesn't keep sitting in the panel.
+function failNote() {
+  if (!S.lastFail || Date.now() - S.lastFail.at > FAIL_NOTE_TTL_MS) return '';
+  return S.lastFail.title + '|' + S.lastFail.reason;
 }
 
 function gapMs() {
@@ -540,7 +603,7 @@ function armLoadTimeout(item, ms) {
   S.loadTimer = setTimeout(() => {
     if (S.currentId !== item.id) return;
     if (S.pending && S.pending.id === item.id && S.pending.ready) return;
-    flagError();
+    flagError('לא הצליח להתחיל לרוץ תוך ' + Math.round(ms / 1000) + ' שניות');
     if (S.items.length > 1) next();
     else { S.currentId = null; setTimeout(() => renderItem(item), SINGLE_RETRY_MS); }
   }, ms);
@@ -549,17 +612,34 @@ function armLoadTimeout(item, ms) {
 // ── Error board ──
 // A failed item flashes the studio ERROR artwork over the waiting board until
 // the next item is revealed (or for a few seconds, whichever comes first).
-function flagError() {
+// `reason` is plain Hebrew and rides along in the heartbeat, so the admin panel
+// can say WHY an item is failing instead of leaving it to guesswork.
+function flagError(reason) {
   const el = $('errBoard');
   el.classList.add('show');
   clearTimeout(S.errTimer);
   S.errTimer = setTimeout(() => el.classList.remove('show'), Math.max(gapMs() + 2000, 5000));
+  if (reason) {
+    S.lastFail = { title: S.currentTitle || '?', reason: String(reason), at: Date.now() };
+  }
 }
 
 // The standard "this item is broken" exit: show the error board, move on.
-function failSkip(delay) {
-  flagError();
+function failSkip(delay, reason) {
+  flagError(reason);
   setTimeout(next, delay || 1500);
+}
+
+// A <video> that refuses a file says why in its error object — usually an
+// unsupported codec, which is the most common reason a local file won't play.
+function videoFailReason(v) {
+  const e = v && v.error;
+  if (!e) return 'הנגן לא הצליח לפתוח את הקובץ';
+  if (e.code === 4) return 'הפורמט או הקודק של הקובץ לא נתמך בדפדפן הזה (נסו MP4/H.264)';
+  if (e.code === 3) return 'הקובץ פגום או מקודד בצורה שהדפדפן לא מפענח';
+  if (e.code === 2) return 'הקובץ נקטע באמצע ההורדה';
+  if (e.code === 1) return 'הטעינה בוטלה';
+  return 'שגיאת מדיה ' + e.code;
 }
 
 // An item finished loading. `start` (optional) begins playback and is only
@@ -585,6 +665,8 @@ function tryReveal(item) {
   const start = S.pending.start;
   S.pending.start = null;
   if (start) { try { start(); } catch (_) {} }
+  // This item came up fine — retract any complaint about it.
+  if (S.lastFail && S.lastFail.title === item.title) S.lastFail = null;
   showStage(true);
   setTimeout(preloadNext, 1200);
 
@@ -593,7 +675,10 @@ function tryReveal(item) {
   if (isVideoType(item)) {
     clearTimeout(S.playWatchdog);
     S.playWatchdog = setTimeout(() => {
-      if (S.currentId === item.id && !S.playingSeen) { flagError(); next(); }
+      if (S.currentId === item.id && !S.playingSeen) {
+        flagError('נטען אבל לא התחיל לנגן (אוטו-פליי חסום?)');
+        next();
+      }
     }, 10000);
   }
 }
@@ -720,20 +805,21 @@ function renderTextItem(stage, item, variant) {
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
 
-  // A notice leads with its subject; the artwork already says "הודעה חשובה".
-  // A slide is just the words, so its title stays a playlist label.
-  const showHeading = variant === 'notice' && item.title;
+  // The on-screen title is its own field and is optional — with none, the
+  // board shows just the text. `item.title` is only the admin's list label and
+  // is never drawn on the screen.
+  const headingText = (item.heading || '').trim();
   let heading = null;
-  if (showHeading) {
+  if (headingText) {
     heading = document.createElement('div');
     heading.className = 'heading';
-    heading.textContent = item.title;
+    heading.textContent = headingText;
     bubble.appendChild(heading);
   }
 
   const body = document.createElement('div');
   body.className = 'body';
-  body.textContent = item.text || (variant === 'slide' ? item.title : '') || '';
+  body.textContent = item.text || '';
   bubble.appendChild(body);
 
   box.appendChild(bubble);
@@ -746,7 +832,7 @@ function renderTextItem(stage, item, variant) {
     const len = (item.text || '').length;
     const bodyMax = len <= 30 ? 7.5 : len <= 90 ? 6 : len <= 200 ? 4.6 : 3.8;
     if (heading) {
-      heading.style.fontSize = (item.title.length <= 22 ? 6 : 4.6) + 'vmin';
+      heading.style.fontSize = (headingText.length <= 22 ? 6 : 4.6) + 'vmin';
     }
     fitText(body, bubble, bodyMax);
     // Heading plus body may still be too tall together — shrink both a notch.
@@ -793,7 +879,7 @@ function renderImage(stage, item) {
   img.alt = item.title;
   img.style.objectFit = fitFor(item);
   img.addEventListener('load', () => markReady(item));
-  img.addEventListener('error', () => failSkip(), { once: true });
+  img.addEventListener('error', () => failSkip(0, 'התמונה לא נטענה מהכתובת הזו'), { once: true });
   img.src = item.url;
   stage.appendChild(img);
 }
@@ -892,7 +978,8 @@ function renderVideo(stage, item) {
     startVideo(warm.el);
     return;
   }
-  stage.appendChild(makeVideoEl(item, item.url, () => failSkip(), true));
+  const v = makeVideoEl(item, item.url, () => failSkip(0, videoFailReason(v)), true);
+  stage.appendChild(v);
 }
 
 // A file sitting in this device's own storage. `url` holds the file name.
@@ -903,7 +990,7 @@ async function renderLocal(stage, item) {
   if (!rec || !rec.blob) {
     // The playlist points at a file this screen doesn't have — skip it and let
     // the admin see the mismatch in the panel.
-    failSkip(1200);
+    failSkip(1200, 'הקובץ "' + item.url + '" לא שמור על המסך הזה');
     return;
   }
   const warm = takePreloaded(item);
@@ -923,7 +1010,8 @@ async function renderLocal(stage, item) {
     S.timedAdvance = true;  // images advance on a timer, like any still content
     armTimers(item);
   } else {
-    stage.appendChild(makeVideoEl(item, S.objectUrl, () => failSkip(), true));
+    const v = makeVideoEl(item, S.objectUrl, () => failSkip(0, videoFailReason(v)), true);
+    stage.appendChild(v);
   }
 }
 
@@ -945,7 +1033,7 @@ function driveId(url) {
 // YouTube. Each attempt is kept short so the waiting screen isn't held for long.
 function renderDrive(stage, item) {
   const id = driveId(item.url);
-  if (!id) { failSkip(); return; }
+  if (!id) { failSkip(0, 'לא זוהה מזהה קובץ בכתובת הדרייב'); return; }
 
   const strategies = [
     'https://drive.usercontent.google.com/download?id=' + id + '&export=download&confirm=t',
@@ -1012,7 +1100,7 @@ function loadYtApi() {
 
 async function renderYouTube(stage, item) {
   const vid = ytId(item.url);
-  if (!vid) { failSkip(); return; }
+  if (!vid) { failSkip(0, 'כתובת היוטיוב לא תקינה'); return; }
 
   const holder = document.createElement('div');
   holder.id = 'yt-' + Date.now();
@@ -1067,7 +1155,8 @@ async function renderYouTube(stage, item) {
           try { tuneSafety(item, e.target.getDuration(), e.target.getCurrentTime()); } catch (_) {}
         }
       },
-      onError: () => failSkip()
+      onError: e => failSkip(0, 'יוטיוב סירב לנגן את הסרטון (שגיאה ' +
+        ((e && e.data) || '?') + ') — פרטי? נמחק? חסום להטמעה?')
     }
   });
 }
@@ -1275,19 +1364,51 @@ function toggleFullscreen() {
   else { userLeftFullscreen = false; enterFullscreen(); }
 }
 
+// Touch gestures on the screen itself, all read off one pointer stream so a
+// swipe is never mistaken for a tap:
+//   • horizontal swipe → next / previous item (handy for checking the screen)
+//   • double tap       → fullscreen in and out
 function goFullscreen() {
   // Kiosk browsers usually grant this on load; a normal browser will refuse
   // until it sees a gesture, which the double tap below provides.
   enterFullscreen();
 
-  // Double tap anywhere toggles fullscreen — in and out, same gesture.
-  let lastTap = 0;
-  document.addEventListener('pointerdown', e => {
+  const layer = $('gestures');
+  let sx = 0, sy = 0, sAt = 0, lastTap = 0;
+
+  layer.addEventListener('pointerdown', e => {
+    sx = e.clientX; sy = e.clientY; sAt = e.timeStamp || Date.now();
+  }, { passive: true });
+
+  layer.addEventListener('pointerup', e => {
     if (S.filesOpen) return;                    // the manager has its own buttons
     const now = e.timeStamp || Date.now();
+    const dx = e.clientX - sx, dy = e.clientY - sy;
+
+    // A deliberate sideways flick rotates the playlist. Left = forward.
+    if (Math.abs(dx) >= SWIPE_MIN_PX && Math.abs(dx) > Math.abs(dy) * 1.4 &&
+        now - sAt < SWIPE_MAX_MS) {
+      lastTap = 0;
+      swipeHint(dx < 0);
+      dx < 0 ? next() : prev();
+      return;
+    }
+    // Anything that moved is a drag, not a tap — and must not count towards
+    // the double tap, or two swipes in a row would drop out of fullscreen.
+    if (Math.abs(dx) > 24 || Math.abs(dy) > 24) { lastTap = 0; return; }
+
     if (now - lastTap < DOUBLE_TAP_MS) { lastTap = 0; toggleFullscreen(); }
     else lastTap = now;
   }, { passive: true });
+}
+
+// Brief arrow so a swipe visibly registered, even mid-load.
+function swipeHint(forward) {
+  const el = $('swipeHint');
+  el.textContent = forward ? '‹‹' : '››';
+  el.classList.add('show');
+  clearTimeout(S.swipeHintTimer);
+  S.swipeHintTimer = setTimeout(() => el.classList.remove('show'), 500);
 }
 
 // Nightly reload keeps memory fresh on long-running kiosk browsers.
@@ -1311,7 +1432,8 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && S.filesOpen) { closeFiles(); return; }
   if (e.key === 'x' || e.key === 'X') { toggleFullscreen(); return; }
   if (S.filesOpen) return;   // don't rotate content behind the manager
-  if (e.key === 'ArrowRight' || e.key === 'ArrowLeft' || e.key === ' ') next();
+  if (e.key === 'ArrowLeft' || e.key === ' ') next();
+  else if (e.key === 'ArrowRight') prev();
 });
 </script>
 

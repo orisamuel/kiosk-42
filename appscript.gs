@@ -80,10 +80,12 @@ function findRow(sheet, colIndex, value) {
 // ============================================================
 // TABLE: PLAYLIST
 // Schema: id(0), title(1), type(2), url(3), duration(4), active(5), order(6), created(7),
-//         loop(8), fit(9), loops(10), text(11)
+//         loop(8), fit(9), loops(10), text(11), heading(12)
 //   type:     youtube | video | drive | local | website | image | slide | notice | error
 //   url:      the address — empty for slide/notice, which carry text instead
-//   text:     body text for slide/notice (the item's title is the heading)
+//   text:     body text for slide/notice/error
+//   heading:  OPTIONAL on-screen title for those types. Blank = show the text
+//             alone. `title` is only the label in the admin list, never drawn.
 //   duration: seconds. Videos ignore it unless set (they run on their own length);
 //             websites/images fall back to defaultDuration.
 //   active:   'כן' / 'לא'
@@ -96,7 +98,7 @@ function findRow(sheet, colIndex, value) {
 // ============================================================
 
 const PLAYLIST_HEADERS = ['id', 'title', 'type', 'url', 'duration', 'active', 'order',
-                          'created', 'loop', 'fit', 'loops', 'text'];
+                          'created', 'loop', 'fit', 'loops', 'text', 'heading'];
 
 // Types the player draws itself from text, with no address to fetch.
 function isTextType(t) {
@@ -119,7 +121,7 @@ function normalizeLoops(loopsCell, legacyLoopCell) {
 // Returns all items (admin needs inactive ones too — the player filters).
 // If `currentTitle` is passed (only the player passes it), records a
 // heartbeat in the script cache so the admin can see the screen is alive.
-function getPlaylist(currentTitle, localFiles, bootId) {
+function getPlaylist(currentTitle, localFiles, bootId, failNote) {
   try {
     const sheet = ensureSheet('playlist', PLAYLIST_HEADERS);
     const data = sheet.getDataRange().getValues();
@@ -136,6 +138,9 @@ function getPlaylist(currentTitle, localFiles, bootId) {
     if (data.length && String(data[0][11] || '') !== 'text') {
       sheet.getRange(1, 12).setValue('text');
     }
+    if (data.length && String(data[0][12] || '') !== 'heading') {
+      sheet.getRange(1, 13).setValue('heading');
+    }
     const items = data.length <= 1 ? [] : data.slice(1)
       .map(r => ({
         id:       String(r[0] || ''),
@@ -149,10 +154,11 @@ function getPlaylist(currentTitle, localFiles, bootId) {
         loops:    normalizeLoops(r[10], r[8]),
         loop:     normalizeLoops(r[10], r[8]) === 0,  // legacy: infinite?
         fit:      String(r[9] || ''),
-        text:     String(r[11] || '')
+        text:     String(r[11] || ''),
+        heading:  String(r[12] || '')
       }))
       // Slides and notices have no url — they carry their own text.
-      .filter(it => it.id && (it.url || it.text))
+      .filter(it => it.id && (it.url || it.text || it.heading))
       .sort((a, b) => a.order - b.order);
 
     if (currentTitle) {
@@ -162,7 +168,9 @@ function getPlaylist(currentTitle, localFiles, bootId) {
         // Changes on every page load, so the panel can confirm a refresh landed.
         boot: bootId ? String(bootId) : '',
         // Files stored on the screen itself, so the admin panel can offer them.
-        files: localFiles ? String(localFiles).split('|').filter(String) : []
+        files: localFiles ? String(localFiles).split('|').filter(String) : [],
+        // 'item title|why it would not play' — the panel shows this verbatim.
+        fail: failNote ? String(failNote) : ''
       }), 21600);
     }
 
@@ -184,7 +192,7 @@ function parseLoopsParam(v) {
 function addItem(d) {
   try {
     if (!d.title) return { success: false, message: 'חסר שם' };
-    if (!d.url && !d.text) return { success: false, message: 'חסר כתובת או טקסט' };
+    if (!d.url && !d.text && !d.heading) return { success: false, message: 'חסר כתובת או טקסט' };
     const sheet = ensureSheet('playlist', PLAYLIST_HEADERS);
     const data = sheet.getDataRange().getValues();
     let maxOrder = 0;
@@ -204,7 +212,8 @@ function addItem(d) {
       parseLoopsParam(d.loops) === 0 ? 'כן' : 'לא',
       d.fit === 'contain' || d.fit === 'cover' ? d.fit : '',
       parseLoopsParam(d.loops),
-      d.text || ''
+      d.text || '',
+      d.heading || ''
     ]);
     return { success: true, message: 'נוסף לפלייליסט', id: id };
   } catch (e) {
@@ -225,6 +234,7 @@ function updateItem(d) {
     if (d.active !== undefined)   sheet.getRange(row, 6).setValue(d.active === 'true' || d.active === true ? 'כן' : 'לא');
     if (d.fit !== undefined)      sheet.getRange(row, 10).setValue(d.fit === 'contain' || d.fit === 'cover' ? d.fit : '');
     if (d.text !== undefined)     sheet.getRange(row, 12).setValue(d.text);
+    if (d.heading !== undefined)  sheet.getRange(row, 13).setValue(d.heading);
     if (d.loops !== undefined) {
       const n = parseLoopsParam(d.loops);
       sheet.getRange(row, 11).setValue(n);
@@ -401,7 +411,8 @@ function getStatus() {
     const raw = CacheService.getScriptCache().get('kioskHeartbeat');
     if (!raw) return { success: true, ts: null };
     const hb = JSON.parse(raw);
-    return { success: true, ts: hb.ts, item: hb.item, files: hb.files || [], boot: hb.boot || '' };
+    return { success: true, ts: hb.ts, item: hb.item, files: hb.files || [],
+             boot: hb.boot || '', fail: hb.fail || '' };
   } catch (e) {
     return { success: false, message: e.toString() };
   }
@@ -472,17 +483,17 @@ function doPost(e) {
 
       // ── Playlist ──────────────────────────────────────────
       case 'getPlaylist':
-        return jsonResponse(getPlaylist(p.current, p.files, p.boot));
+        return jsonResponse(getPlaylist(p.current, p.files, p.boot, p.fail));
       case 'addItem':
         return jsonResponse(addItem({
           title: p.title, type: p.type, url: p.url, duration: p.duration,
-          loops: p.loops, fit: p.fit, text: p.text
+          loops: p.loops, fit: p.fit, text: p.text, heading: p.heading
         }));
       case 'updateItem':
         return jsonResponse(updateItem({
           id: p.id, title: p.title, type: p.type, url: p.url,
           duration: p.duration, active: p.active, loops: p.loops, fit: p.fit,
-          text: p.text
+          text: p.text, heading: p.heading
         }));
       case 'deleteItem':
         return jsonResponse(deleteItem(p.id));

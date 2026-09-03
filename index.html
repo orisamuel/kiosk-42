@@ -98,6 +98,27 @@
   }
   .sync-chip.saved { color: var(--success); }
 
+  /* ── Local-file picker (only reaches the screen when run on the kiosk) ── */
+  .file-drop {
+    display: block; text-align: center; cursor: pointer;
+    padding: 16px; border-radius: var(--radius-md);
+    border: 1px dashed var(--accent);
+    background: var(--glass-bg);
+    font-weight: 700; font-size: 0.95rem;
+    transition: var(--t-fast);
+  }
+  .file-drop:hover { background: var(--glass-hover); }
+  .file-drop input { display: none; }
+  .file-drop.busy { opacity: 0.6; cursor: default; }
+  .dev-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 0; border-bottom: 1px solid var(--glass-border);
+    font-size: 0.82rem;
+  }
+  .dev-row:last-child { border-bottom: 0; }
+  .dev-row .dev-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dev-row .dev-size { color: var(--text-muted); }
+
   /* ── Type picker (add-item step 1) ── */
   .type-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .type-tile {
@@ -164,6 +185,8 @@
       <div class="status-dot" id="statusDot"></div>
       <span id="statusText">בודק חיבור למסך...</span>
     </div>
+    <div class="status-line" id="failLine"
+         style="display:none; margin-top:8px; color:var(--danger); font-size:0.85rem;"></div>
     <div class="toolbar">
       <button class="btn btn-primary" onclick="openAddModal()">➕ הוספת פריט</button>
       <button class="btn btn-secondary" onclick="refreshKiosk()" id="refreshBtn">🔄 רענון המסך</button>
@@ -276,13 +299,25 @@
         <div class="hint" id="textHint"></div>
       </div>
       <div class="form-group" id="localGroup" style="display:none;">
-        <label class="form-label">קובץ ששמור על המסך</label>
+        <label class="form-label">בחירת קובץ מהמכשיר</label>
+        <label class="file-drop" id="fileDrop">
+          <input type="file" id="fFilePicker" accept="video/*,image/*" multiple
+                 onchange="importLocalFiles(this.files)">＋ בחירת קבצים מהמכשיר הזה</label>
+        <div class="hint" id="deviceHint" style="margin-top:8px;"></div>
+        <div id="deviceList"></div>
+        <label class="form-label" style="margin-top:16px;">או קובץ שכבר שמור על המסך</label>
         <select class="form-select" id="fLocal" onchange="onLocalPick()"></select>
         <div class="hint" id="localHint"></div>
+      </div>
+      <div class="form-group" id="headingGroup" style="display:none;">
+        <label class="form-label">כותרת על המסך (אופציונלי)</label>
+        <input class="form-input" id="fHeading" type="text" placeholder="בלי כותרת — יוצג רק הטקסט">
+        <div class="hint">אם משאירים ריק, המסך יציג את הטקסט לבד, בלי כותרת.</div>
       </div>
       <div class="form-group">
         <label class="form-label">שם (לתצוגה ברשימה)</label>
         <input class="form-input" id="fTitle" type="text" placeholder="למשל: סרטון תדמית">
+        <div class="hint" id="titleHint"></div>
       </div>
       <div class="form-group" id="loopGroup" style="display:none;">
         <label class="form-label">🔁 כמה פעמים לרוץ</label>
@@ -342,6 +377,66 @@ const TYPE_META = {
 // File names the kiosk reported in its last heartbeat.
 let kioskFiles = [];
 
+// ── Files stored on THIS device ─────────────────────────────
+// The panel and the player are served from the same origin, so they share one
+// IndexedDB. So this page — when it is opened on the kiosk itself — can save a
+// file straight into the storage the player reads from, which turns "a file on
+// the screen" into an ordinary add-item with a file picker, instead of the
+// hidden five-tap corner gesture over on the player.
+const DB_NAME = 'kioskFiles', DB_STORE = 'files';
+// Breadcrumb the player leaves behind on every poll (see player.html).
+const HERE_KEY = 'kioskPlayerHere';
+
+let deviceFiles = [];       // file records held by THIS browser
+let kioskBoot = '';         // boot id of the live screen, from the heartbeat
+
+function idb() {
+  return new Promise((resolve, reject) => {
+    const r = indexedDB.open(DB_NAME, 1);
+    r.onupgradeneeded = () => {
+      if (!r.result.objectStoreNames.contains(DB_STORE)) {
+        r.result.createObjectStore(DB_STORE, { keyPath: 'name' });
+      }
+    };
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  });
+}
+
+function idbRun(mode, fn) {
+  return idb().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, mode);
+    const req = fn(tx.objectStore(DB_STORE));
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  }));
+}
+
+async function loadDeviceFiles() {
+  try { deviceFiles = (await idbRun('readonly', st => st.getAll())) || []; }
+  catch (_) { deviceFiles = []; }
+  return deviceFiles;
+}
+
+// Is this file actually available to the screen? The heartbeat is the source of
+// truth, but a file saved here moments ago is already on the screen a whole
+// poll before the heartbeat catches up — so trust this device too when it IS
+// the screen.
+function fileOnScreen(name) {
+  if (kioskFiles.indexOf(name) !== -1) return true;
+  const here = playerHere();
+  return !!(here && here.live && deviceFiles.some(f => f.name === name));
+}
+
+// Has the player ever run in this browser, and is it the live screen right now?
+function playerHere() {
+  try {
+    const m = JSON.parse(localStorage.getItem(HERE_KEY) || 'null');
+    if (!m || !m.ts) return null;
+    return { ts: m.ts, boot: m.boot || '', live: !!(m.boot && m.boot === kioskBoot) };
+  } catch (_) { return null; }
+}
+
 let items = [];
 let settings = null;
 let editingId = null;
@@ -360,6 +455,7 @@ warmupServer();
   } finally {
     hideLoadingScreen();
   }
+  await loadDeviceFiles();
   refreshStatus();
   setInterval(refreshStatus, 30000);
 })();
@@ -461,11 +557,13 @@ function renderList() {
         <span class="pl-title">${esc(it.title)}</span>
         ${it.pending ? '<span class="badge">⏳ שומר...</span>' : ''}
         ${it.active ? '' : '<span class="badge badge-off">מושבת</span>'}
-        ${it.type === 'local' && kioskFiles.length && kioskFiles.indexOf(it.url) === -1
-          ? '<span class="badge badge-off">הקובץ לא על המסך</span>' : ''}
+        ${it.type === 'local' && !fileOnScreen(it.url)
+          ? '<span class="badge badge-off">⚠ הקובץ לא על המסך</span>' : ''}
       </div>
       <div class="pl-url"${isTextItem(it.type) ? ' style="direction:rtl; text-align:right;"' : ''}>${esc(
-        isTextItem(it.type) ? (it.text || '').replace(/\s+/g, ' ').slice(0, 90) : it.url
+        isTextItem(it.type)
+          ? ((it.heading ? it.heading + ' — ' : '') + (it.text || '')).replace(/\s+/g, ' ').slice(0, 90)
+          : it.url
       )}</div>
       <div class="pl-bottom">
         <span class="pl-meta">${meta.label} · ${dur}${it.fit ? ' · ' + (it.fit === 'cover' ? 'מלא מסך' : 'שלם') : ''}</span>
@@ -682,6 +780,7 @@ function openAddModal() {
   document.getElementById('fLoops').value = '1';
   document.getElementById('fFit').value = '';
   document.getElementById('fText').value = '';
+  document.getElementById('fHeading').value = '';
   showTypeStep();
   document.getElementById('itemModal').classList.add('open');
 }
@@ -702,6 +801,7 @@ function openEditModal(id) {
   loopsSel.value = loops;
   document.getElementById('fFit').value = it.fit || '';
   document.getElementById('fText').value = it.text || '';
+  document.getElementById('fHeading').value = it.heading || '';
   setType(it.type);
   showFormStep();
   document.getElementById('itemModal').classList.add('open');
@@ -784,13 +884,18 @@ function updateTypeFields() {
   document.getElementById('localGroup').style.display = type === 'local' ? '' : 'none';
   document.getElementById('textGroup').style.display  = isText ? '' : 'none';
   document.getElementById('urlGroup').style.display   = (type === 'local' || isText) ? 'none' : '';
-  if (type === 'local') fillLocalPicker();
+  // The on-screen title only exists for the boards the screen draws itself.
+  document.getElementById('headingGroup').style.display = isText ? '' : 'none';
+  document.getElementById('titleHint').textContent = isText
+    ? 'לזיהוי הפריט בפלייליסט בלבד — השם הזה לא מוצג על המסך.' : '';
+  if (type === 'local') {
+    fillLocalPicker();
+    loadDeviceFiles().then(() => { drawDeviceList(); drawDeviceHint(); });
+  }
   if (isText) {
     document.getElementById('textLabel').textContent = type === 'notice' ? 'תוכן ההודעה' : 'הטקסט';
-    document.getElementById('textHint').textContent = type === 'notice'
-      ? 'השם שלמעלה יופיע ככותרת ההודעה על המסך. הטקסט כאן הוא גוף ההודעה.'
-      : type === 'error'
-      ? 'הטקסט יוצג בפס העליון של לוח ה-ERROR, מעל הרובוט. השם שלמעלה נשאר רק לרשימה.'
+    document.getElementById('textHint').textContent = type === 'error'
+      ? 'הטקסט יוצג בפס העליון של לוח ה-ERROR, מעל הרובוט.'
       : 'הטקסט יוצג במרכז המסך. גודל האותיות מותאם אוטומטית לאורך.';
   }
   if (isVideo) {
@@ -814,16 +919,17 @@ function fillLocalPicker() {
   const hint = document.getElementById('localHint');
   const chosen = document.getElementById('fUrl').value.trim();
   const names = kioskFiles.slice();
+  deviceFiles.forEach(f => { if (names.indexOf(f.name) === -1) names.push(f.name); });
   if (chosen && names.indexOf(chosen) === -1) names.unshift(chosen);
 
   if (!names.length) {
     sel.innerHTML = '<option value="">— אין קבצים על המסך —</option>';
-    hint.innerHTML = 'כדי להוסיף קובץ: ניגשים למסך עצמו, מקישים 5 פעמים בפינה השמאלית העליונה ובוחרים קובץ. ' +
-                     'הוא נשמר על המסך ונוסף לפלייליסט אוטומטית — אין צורך להוסיף אותו כאן.';
+    hint.textContent = 'המסך לא מדווח על קבצים שמורים. הדרך להוסיף: לפתוח את עמוד הניהול ' +
+                       'מהמסך עצמו ולבחור קובץ למעלה.';
     return;
   }
   sel.innerHTML = names.map(n =>
-    `<option value="${esc(n)}"${n === chosen ? ' selected' : ''}>${esc(n)}${kioskFiles.indexOf(n) === -1 ? ' (לא נמצא על המסך)' : ''}</option>`
+    `<option value="${esc(n)}"${n === chosen ? ' selected' : ''}>${esc(n)}${fileOnScreen(n) ? '' : ' (לא נמצא על המסך)'}</option>`
   ).join('');
   hint.textContent = 'הקובץ מתנגן מהזיכרון של המסך — בלי אינטרנט ובלי מגבלת גודל.';
   onLocalPick();
@@ -834,6 +940,130 @@ function onLocalPick() {
   document.getElementById('fUrl').value = sel.value;
   const title = document.getElementById('fTitle');
   if (!title.value.trim() && sel.value) title.value = sel.value.replace(/\.[^.]+$/, '');
+}
+
+// Whether a file saved here will actually reach the screen — so nobody parks a
+// 300MB video in their phone's storage by mistake.
+function drawDeviceHint() {
+  const hint = document.getElementById('deviceHint');
+  const here = playerHere();
+  if (here && here.live) {
+    hint.innerHTML = '<span style="color:var(--success);">✔ זה המכשיר של המסך</span> — ' +
+      'קובץ שנבחר כאן נשמר עליו, ומתנגן גם בלי אינטרנט ובלי מגבלת גודל.';
+  } else if (here) {
+    hint.textContent = 'הנגן רץ על המכשיר הזה בעבר, אבל לא כרגע. הקובץ יישמר כאן ' +
+      'ויתנגן כשהנגן ייפתח עליו שוב.';
+  } else {
+    hint.innerHTML = '⚠ הקובץ נשמר <b>על המכשיר שאתם עליו עכשיו</b> ולא בענן, ולכן זה עובד ' +
+      'רק כשפותחים את עמוד הניהול <b>מהמסך עצמו</b>. מכל מכשיר אחר — יוטיוב כ-Unlisted.';
+  }
+}
+
+// The files this browser holds, with a way to free the space again.
+function drawDeviceList() {
+  const box = document.getElementById('deviceList');
+  if (!deviceFiles.length) { box.innerHTML = ''; return; }
+  box.innerHTML = '<div class="hint" style="margin:12px 0 2px;">שמורים על המכשיר הזה:</div>' +
+    deviceFiles.map(f => '<div class="dev-row">' +
+      '<span class="dev-name">' +
+        ((f.type || '').indexOf('image/') === 0 ? '\uD83D\uDDBC\uFE0F' : '\uD83C\uDFAC') +
+        ' ' + esc(f.name) + '</span>' +
+      '<span class="dev-size">' + fmtSize(f.size || 0) + '</span>' +
+      '<button class="icon-btn" title="מחיקה מהמכשיר" data-name="' + esc(f.name) + '" ' +
+        'onclick="deleteDeviceFile(this.dataset.name)">\uD83D\uDDD1\uFE0F</button>' +
+      '</div>').join('');
+}
+
+function fmtSize(b) {
+  if (b >= 1073741824) return (b / 1073741824).toFixed(1) + ' GB';
+  if (b >= 1048576)    return Math.round(b / 1048576) + ' MB';
+  return Math.max(1, Math.round(b / 1024)) + ' KB';
+}
+
+async function deleteDeviceFile(name) {
+  if (!confirm('למחוק את "' + name + '" מהזיכרון של המכשיר?\n' +
+               'פריט בפלייליסט שמצביע עליו יפסיק לעבוד.')) return;
+  try { await idbRun('readwrite', st => st.delete(name)); }
+  catch (e) { return showToast('מחיקה נכשלה: ' + e, 'error'); }
+  await loadDeviceFiles();
+  drawDeviceList();
+  fillLocalPicker();
+  showToast('נמחק מהמכשיר', 'success');
+}
+
+// Copy the chosen files into this device's storage. One file drops into the
+// open form (so loops / fit can still be set); several are added to the
+// playlist as they are — the whole flow in a single step either way.
+async function importLocalFiles(fileList_) {
+  const files = Array.from(fileList_ || []);
+  document.getElementById('fFilePicker').value = '';
+  if (!files.length) return;
+
+  const drop = document.getElementById('fileDrop');
+  const idle = '＋ בחירת קבצים מהמכשיר הזה';
+  const setLabel = t => { drop.lastChild.textContent = t; };
+  drop.classList.add('busy');
+
+  const saved = [];
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    setLabel('שומר ' + (i + 1) + '/' + files.length + ': ' + f.name + ' (' + fmtSize(f.size) + ')...');
+    try {
+      await idbRun('readwrite', st => st.put({
+        name: f.name, blob: f, size: f.size, type: f.type, added: Date.now()
+      }));
+      saved.push(f);
+    } catch (e) {
+      showToast(e.name === 'QuotaExceededError'
+        ? 'אין מספיק מקום פנוי במכשיר עבור ' + f.name
+        : 'שמירת ' + f.name + ' נכשלה: ' + e, 'error', 8000);
+      break;
+    }
+  }
+
+  drop.classList.remove('busy');
+  setLabel(idle);
+  // Ask the browser to keep these instead of evicting them under disk pressure.
+  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (_) {}
+  await loadDeviceFiles();
+  drawDeviceList();
+  if (!saved.length) return;
+
+  if (saved.length === 1 && !editingId) {
+    fillLocalPicker();
+    const sel = document.getElementById('fLocal');
+    sel.value = saved[0].name;
+    onLocalPick();
+    showToast('הקובץ נשמר על המכשיר — לחצו שמירה כדי להוסיף לפלייליסט', 'success', 6000);
+    return;
+  }
+  saved.forEach(f => addLocalItem(f.name));
+  closeModal();
+  showToast(saved.length + ' קבצים נשמרו ונוספו לפלייליסט ✓', 'success');
+}
+
+// Optimistic add of one on-device file — the same path saveItem() takes.
+function addLocalItem(name) {
+  const it = {
+    id: 'tmp-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+    title: name.replace(/\.[^.]+$/, ''), type: 'local', url: name,
+    duration: 0, fit: '', text: '', heading: '',
+    loops: 1, loop: false, active: true, pending: true
+  };
+  items.push(it);
+  renderList();
+  enqueue(async () => {
+    const res = await apiCall('addItem', {
+      title: it.title, type: 'local', url: name, duration: 0, loops: '1', fit: ''
+    });
+    if (!res.success) throw new Error(res.message || 'שגיאה');
+    it.id = res.id;
+    it.pending = false;
+    renderList();
+  }, () => {
+    const i = items.indexOf(it);
+    if (i > -1) { items.splice(i, 1); renderList(); }
+  });
 }
 
 function ytId(url) {
@@ -856,9 +1086,11 @@ function saveItem() {
   const loops = isVideo ? document.getElementById('fLoops').value : '1';
   const fit = (type === 'website' || isText) ? '' : document.getElementById('fFit').value;
   const text = isText ? document.getElementById('fText').value.trim() : '';
+  const heading = isText ? document.getElementById('fHeading').value.trim() : '';
 
   if (isText) {
-    if (!title || !text) return showToast('נא למלא שם וטקסט', 'warning');
+    if (!title) return showToast('נא למלא שם לרשימה', 'warning');
+    if (!text && !heading) return showToast('נא למלא טקסט (או לפחות כותרת)', 'warning');
   } else if (!url || !title) {
     return showToast(type === 'local' ? 'נא לבחור קובץ ולתת שם' : 'נא למלא כתובת ושם', 'warning');
   }
@@ -866,7 +1098,7 @@ function saveItem() {
   if (type === 'drive' && !driveId(url)) return showToast('לא זוהה קובץ בכתובת הדרייב — העתיקו את קישור השיתוף המלא', 'warning');
 
   const loopsNum = parseInt(loops) >= 0 ? parseInt(loops) : 1;
-  const payload = { title, type, url, duration, loops, fit, text };
+  const payload = { title, type, url, duration, loops, fit, text, heading };
 
   if (editingId) {
     const it = items.find(x => x.id === editingId);
@@ -874,7 +1106,7 @@ function saveItem() {
     if (!it) return;
     const backup = { ...it };
     Object.assign(it, {
-      title, type, url, duration, fit, text,
+      title, type, url, duration, fit, text, heading,
       loops: loopsNum, loop: loopsNum === 0, pending: true
     });
     closeModal();
@@ -889,7 +1121,7 @@ function saveItem() {
   } else {
     const it = {
       id: 'tmp-' + Date.now(),
-      title, type, url, duration, fit, text,
+      title, type, url, duration, fit, text, heading,
       loops: loopsNum, loop: loopsNum === 0,
       active: true, pending: true
     };
@@ -1012,11 +1244,15 @@ async function refreshStatus() {
   try {
     const res = await apiCall('getStatus');
     if (!res.success) throw new Error(res.message);
+    kioskBoot = res.boot || '';
+    showScreenFailure(res.fail);
     if (Array.isArray(res.files)) {
       kioskFiles = res.files;
+      renderList();   // the "file not on the screen" badges depend on this
       if (currentType === 'local' &&
           document.getElementById('itemModal').classList.contains('open')) {
         fillLocalPicker();
+        drawDeviceHint();
       }
     }
     if (!res.ts) {
@@ -1037,6 +1273,16 @@ async function refreshStatus() {
     dot.className = 'status-dot';
     text.textContent = 'לא ניתן לבדוק את מצב המסך';
   }
+}
+
+// The screen tells us which item last refused to play and why. Surfacing it
+// beats "one of the files doesn't work and nobody knows why".
+function showScreenFailure(note) {
+  const el = document.getElementById('failLine');
+  const parts = String(note || '').split('|');
+  if (!parts[0] || !parts[1]) { el.style.display = 'none'; return; }
+  el.style.display = '';
+  el.innerHTML = '⚠ <b>' + esc(parts[0]) + '</b> נכשל על המסך: ' + esc(parts.slice(1).join('|'));
 }
 
 function agoText(sec) {
