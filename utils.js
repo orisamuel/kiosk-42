@@ -1,6 +1,6 @@
 /**
  * utils.js — shared utilities loaded by every page
- * Provides: apiCall, theme, loading-screen, toast, auth, formatting, sound.
+ * Provides: apiCall, access code, theme, loading-screen, toast, formatting, sound.
  */
 
 // ── Theme ──────────────────────────────────────────────────
@@ -56,7 +56,9 @@ async function apiCall(action, params = {}) {
     if (!CONFIG.SCRIPT_URL || CONFIG.SCRIPT_URL.includes('PASTE_')) {
         throw new Error('SCRIPT_URL not configured in config.js');
     }
-    const url = CONFIG.SCRIPT_URL + '?' + new URLSearchParams({ action, ...params });
+    const key = getAccessKey();
+    const url = CONFIG.SCRIPT_URL + '?' + new URLSearchParams(
+        key ? { action, ...params, key } : { action, ...params });
     const res = await fetch(url, { redirect: 'follow' });
     if (!res.ok) throw new Error('Server error: ' + res.status);
     const text = await res.text();
@@ -104,47 +106,34 @@ function showStatus(message, type = 'info', duration = 5000) {
     showToast(message, type, duration);
 }
 
-// ── Auth (sessionStorage, 12h TTL) ─────────────────────────
+// ── Access code ────────────────────────────────────────────
+// The backend refuses every call without the access code (see appscript.gs).
+// Each device keeps it in localStorage — the panel and the player share one
+// origin, so a device that has it for one has it for both. It arrives once,
+// through an access link (…#key=CODE), a code typed into the panel, or, for
+// the screen, by being approved from the panel.
 
-const AUTH_KEY    = 'app_auth';
-const AUTH_TTL_MS = 12 * 60 * 60 * 1000;
+const ACCESS_KEY_STORE = 'kioskKey';
 
-function getAuthSession() {
+function getAccessKey() {
+    try { return localStorage.getItem(ACCESS_KEY_STORE) || ''; } catch (_) { return ''; }
+}
+
+function setAccessKey(k) {
     try {
-        const raw = sessionStorage.getItem(AUTH_KEY);
-        if (!raw) return null;
-        const s = JSON.parse(raw);
-        if (!s.loggedIn || Date.now() > s.exp) {
-            sessionStorage.removeItem(AUTH_KEY);
-            return null;
-        }
-        return s;
-    } catch (_) { return null; }
+        if (k) localStorage.setItem(ACCESS_KEY_STORE, k);
+        else localStorage.removeItem(ACCESS_KEY_STORE);
+    } catch (_) {}
 }
 
-function setAuthSession(username) {
-    sessionStorage.setItem(AUTH_KEY, JSON.stringify({
-        loggedIn: true,
-        user: username,
-        exp: Date.now() + AUTH_TTL_MS
-    }));
-}
-
-function clearAuthSession() {
-    sessionStorage.removeItem(AUTH_KEY);
-}
-
-function logout() {
-    clearAuthSession();
-    window.location.href = 'login.html';
-}
-
-// Call at the very top of every protected page.
-function requireAuth() {
-    if (!getAuthSession()) {
-        sessionStorage.setItem('app_redirect', window.location.href);
-        window.location.href = 'login.html';
-    }
+// Take the code from an access link and wipe it from the address bar, so it
+// isn't left sitting in the tab or in a screenshot.
+function adoptKeyFromHash() {
+    const m = location.hash.match(/[#&]key=([^&]+)/);
+    if (!m) return false;
+    setAccessKey(decodeURIComponent(m[1]));
+    history.replaceState(null, '', location.pathname + location.search);
+    return true;
 }
 
 // ── Formatting ─────────────────────────────────────────────

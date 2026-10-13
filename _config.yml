@@ -1,0 +1,7 @@
+# GitHub Pages (Jekyll) — keep internal files off the public site.
+# The repo itself is public; these just don't need to be served as pages.
+exclude:
+  - CLAUDE.md
+  - appscript.gs
+  - appsscript.json
+  - source-art

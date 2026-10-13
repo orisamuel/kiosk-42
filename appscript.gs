@@ -18,11 +18,60 @@
 const SHEET_ID = '1sBuKpJyIpA_yZzQB0zIo9zQaM1Yb-ZZpE638tQRk3d4';
 
 // ============================================================
+// ACCESS
+// The script URL sits in config.js on a public site, so every action except
+// `ping` needs the access code. Only its SHA-256 lives here — the code itself
+// is in the project's .env and on each paired device (localStorage
+// 'kioskKey'). To rotate it: put a new code in .env, its hash below, redeploy,
+// then open the panel with the new access link and re-pair the screen.
+// ============================================================
+
+const KEY_HASH = '79484da10a11feccd1c377da9bd0c25350454ea0b96185054f8184573ab7e52a';
+
+function sha256Hex(s) {
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(s), Utilities.Charset.UTF_8)
+    .map(b => ('0' + (b & 0xff).toString(16)).slice(-2)).join('');
+}
+
+function keyOk(k) {
+  return !!k && sha256Hex(k) === KEY_HASH;
+}
+
+// A screen with no code yet asks for its playlist anyway. That request is
+// parked as "pending" for the panel to approve; once approved, the next
+// request from the same page load is answered normally and carries the code,
+// which the screen keeps from then on.
+function pairScreen(p) {
+  const boot = String(p.boot || '').slice(0, 40);
+  if (!boot) return { success: false, auth: 'denied', message: 'אין גישה' };
+  const cache = CacheService.getScriptCache();
+  const handed = cache.get('kioskPair:' + boot);
+  if (handed && keyOk(handed)) {
+    cache.remove('kioskPair:' + boot);
+    cache.remove('kioskPending');
+    const res = getPlaylist(p.current, p.files, p.boot, p.fail);
+    res.screenKey = handed;
+    return res;
+  }
+  cache.put('kioskPending', JSON.stringify({ boot: boot, ts: Date.now() }), 600);
+  return { success: false, auth: 'pair', message: 'המסך ממתין לחיבור בממשק הניהול' };
+}
+
+// Called from the panel (which holds the code) for the screen it saw pending.
+function approveScreen(boot, key) {
+  boot = String(boot || '').slice(0, 40);
+  if (!boot) return { success: false, message: 'חסר מזהה מסך' };
+  CacheService.getScriptCache().put('kioskPair:' + boot, String(key), 600);
+  return { success: true, message: 'המסך יתחבר בבדיקה הבאה שלו' };
+}
+
+// ============================================================
 // HELPERS
 // ============================================================
 
+let spreadsheet_ = null;   // one open per request — openById is slow
 function getSpreadsheet() {
-  return SpreadsheetApp.openById(SHEET_ID);
+  return spreadsheet_ || (spreadsheet_ = SpreadsheetApp.openById(SHEET_ID));
 }
 
 function getSheet(name) {
@@ -361,7 +410,9 @@ function getSettingsMap() {
     reloadToken:     parseInt(map.reloadToken) || 1,
     videoFit:        map.videoFit === 'contain' ? 'contain' : 'cover',
     gapSeconds:      Math.min(120, Math.max(0, isNaN(parseInt(map.gapSeconds)) ? 10 : parseInt(map.gapSeconds))),
-    idleMessage:     map.idleMessage === undefined ? '' : String(map.idleMessage)
+    idleMessage:     map.idleMessage === undefined ? '' : String(map.idleMessage),
+    // 'itemId|ms' — written by showNow; the screen acts on each new one once.
+    showNow:         String(map.showNow || '')
   };
 }
 
@@ -402,17 +453,34 @@ function refreshKiosk() {
   }
 }
 
+// Ask the screen to jump to one item on its next check-in. Works for inactive
+// items too — a one-off showing that then returns to the normal rotation.
+function showNow(id) {
+  try {
+    const sheet = getSheet('playlist');
+    if (!sheet || findRow(sheet, 0, id) === -1) return { success: false, message: 'פריט לא נמצא' };
+    setSettingRow(ensureSheet('settings', ['key', 'value']), 'showNow', String(id) + '|' + Date.now());
+    return { success: true, message: 'נשלח למסך' };
+  } catch (e) {
+    return { success: false, message: e.toString() };
+  }
+}
+
 // ============================================================
 // KIOSK STATUS — heartbeat written by the player on every poll
 // ============================================================
 
 function getStatus() {
   try {
-    const raw = CacheService.getScriptCache().get('kioskHeartbeat');
-    if (!raw) return { success: true, ts: null };
+    const cache = CacheService.getScriptCache();
+    // A screen without the access code, waiting to be approved in the panel.
+    let pending = null;
+    try { pending = JSON.parse(cache.get('kioskPending') || 'null'); } catch (_) {}
+    const raw = cache.get('kioskHeartbeat');
+    if (!raw) return { success: true, ts: null, pending: pending };
     const hb = JSON.parse(raw);
     return { success: true, ts: hb.ts, item: hb.item, files: hb.files || [],
-             boot: hb.boot || '', fail: hb.fail || '' };
+             boot: hb.boot || '', fail: hb.fail || '', pending: pending };
   } catch (e) {
     return { success: false, message: e.toString() };
   }
@@ -476,10 +544,14 @@ function doPost(e) {
     const action = e.parameter.action;
     const p = e.parameter;
 
-    switch (action) {
+    if (action === 'ping') return jsonResponse({ success: true, version: 'v2' });
+    if (!keyOk(p.key)) {
+      // A screen asking for its playlist without the code is offered pairing.
+      if (action === 'getPlaylist') return jsonResponse(pairScreen(p));
+      return jsonResponse({ success: false, auth: 'denied', message: 'אין גישה: חסר קוד גישה או שהוא שגוי' });
+    }
 
-      case 'ping':
-        return jsonResponse({ success: true, version: 'v1' });
+    switch (action) {
 
       // ── Playlist ──────────────────────────────────────────
       case 'getPlaylist':
@@ -507,8 +579,12 @@ function doPost(e) {
         return jsonResponse(updateSettings(p));
       case 'refreshKiosk':
         return jsonResponse(refreshKiosk());
+      case 'showNow':
+        return jsonResponse(showNow(p.id));
       case 'getStatus':
         return jsonResponse(getStatus());
+      case 'approveScreen':
+        return jsonResponse(approveScreen(p.boot, p.key));
       case 'checkEmbed':
         return jsonResponse(checkEmbed(p.url));
 

@@ -10,8 +10,11 @@
 <link rel="preload" as="image" href="assets/error-pink.png">
 <link rel="preconnect" href="https://www.youtube.com" crossorigin>
 <link rel="preconnect" href="https://i.ytimg.com" crossorigin>
-<script src="config.js"></script>
-<script src="utils.js"></script>
+<!-- ?v= busts the browser cache: a reload revalidates this page but may reuse
+     the scripts, and a new page with old scripts would half-work. Bump it
+     whenever config.js or utils.js change. -->
+<script src="config.js?v=2"></script>
+<script src="utils.js?v=2"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body {
@@ -341,6 +344,13 @@ const FAIL_NOTE_TTL_MS  = 15 * 60 * 1000;   // how long a failure stays reported
 const REVEAL_WAIT_MS    = 2500;   // hold the waiting board until playback rolls
 const LONG_PRESS_MS     = 700;    // press-and-hold that hands the screen over
 const TOUCH_IDLE_MS     = 3 * 60 * 1000;  // never leave a public screen unlocked
+const YT_API_TIMEOUT_MS = 10000;  // give up on the YouTube API script after this
+const SHOW_NOW_TTL_MS   = 10 * 60 * 1000; // older "show now" requests are ignored
+
+// player.html?preview=1 is the panel's live preview of a text board: it draws
+// whatever item the panel posts to it and does nothing else — no polling, no
+// heartbeat, no rotation, and no claim to be the screen.
+const PREVIEW = /[?&]preview\b/.test(location.search);
 
 // ════════════════════════════════════════════════════════════
 // State
@@ -385,8 +395,13 @@ const S = {
   pressFired: false,
   filesAutoClose: null,
   preload: null,        // { id, el|img, blobUrl } — next item, warmed in advance
+  quickPoll: false,     // check in again soon (so the panel sees a change fast)
   bootId: String(Date.now()) + '-' + Math.random().toString(36).slice(2, 7)
 };
+
+// The short code shown on the waiting board while the screen waits to be
+// paired — the panel shows the same one, so the two can be matched up.
+function pairCode() { return S.bootId.slice(-5); }
 
 const CACHE_KEY = 'kioskCache';
 // Names of the on-device file store. Declared up here, not next to the file
@@ -410,6 +425,8 @@ function markPlayerHere() {
 // Boot
 // ════════════════════════════════════════════════════════════
 (function boot() {
+  if (PREVIEW) { startPreview(); return; }
+  adoptKeyFromHash();   // player.html#key=… pairs this device directly
   markPlayerHere();
   startClocks();
   requestWakeLock();
@@ -492,11 +509,19 @@ async function poll() {
       fail: failNote(),
       boot: S.bootId
     });
+    // Just approved in the panel: keep the code for every call from now on.
+    if (res.screenKey) setAccessKey(res.screenKey);
     // A non-JSON reply (Google error page during a redeploy) must never be
     // mistaken for an empty playlist — that would blank a working screen.
     if (res.success && Array.isArray(res.items)) {
       S.failStreak = 0;
+      setPairHint(false);
       applyData(res, false);
+    } else if (res.auth) {
+      // No (valid) code on this device. The screen keeps playing the last
+      // playlist it knew and asks to be approved from the panel.
+      S.failStreak = 0;
+      setPairHint(true);
     } else {
       S.failStreak++;
     }
@@ -507,8 +532,10 @@ async function poll() {
 
   markPlayerHere();
   const sec = (S.settings && S.settings.refreshSeconds) || 60;
+  const wait = S.quickPoll ? 3 : Math.max(15, sec);
+  S.quickPoll = false;
   clearTimeout(S.pollTimer);
-  S.pollTimer = setTimeout(poll, Math.max(15, sec) * 1000);
+  S.pollTimer = setTimeout(poll, wait * 1000);
 
   checkDailyReload();
 }
@@ -535,8 +562,12 @@ function applyData(res, fromCache) {
 
   // Somebody is working on the screen. Leave the content exactly where it is —
   // the next poll after they step away picks any change up.
-  if (S.touchMode) return;
+  if (!S.touchMode) applyItems(res);
+  // A deliberate "show this now" from the panel overrides even touch mode.
+  if (!fromCache) handleShowNow(settings, res.items || []);
+}
 
+function applyItems(res) {
   const active = (res.items || []).filter(i => i.active);
 
   if (!active.length) {
@@ -565,6 +596,62 @@ function applyData(res, fromCache) {
     S.idx = -1;
     next();
   }
+}
+
+// ── "Show now" from the panel ──
+// settings.showNow is 'itemId|ms'. Each request is acted on once (remembered
+// across reloads), and only while fresh, so a screen that was off doesn't
+// jump to something asked for an hour ago. An inactive item plays once and
+// the rotation then carries on from where it was.
+const SHOW_NOW_DONE = 'kioskShowNowDone';
+
+function handleShowNow(settings, allItems) {
+  const parts = String(settings.showNow || '').split('|');
+  const id = parts[0], at = parseInt(parts[1]) || 0;
+  if (!id || !at) return;
+  let done = 0;
+  try { done = parseInt(localStorage.getItem(SHOW_NOW_DONE)) || 0; } catch (_) {}
+  if (at <= done) return;
+  try { localStorage.setItem(SHOW_NOW_DONE, String(at)); } catch (_) {}
+  if (Date.now() - at > SHOW_NOW_TTL_MS) return;
+
+  const item = allItems.find(i => i.id === id);
+  if (!item) return;
+  const inRotation = S.items.findIndex(i => i.id === id);
+  if (inRotation !== -1) S.idx = inRotation;
+  S.revealAt = 0;          // somebody is waiting for it — no breather first
+  renderItem(item);
+  S.quickPoll = true;      // report the new item right away, for the panel
+}
+
+function setPairHint(on) {
+  $('fbHint').textContent = on
+    ? 'המסך ממתין לחיבור · קוד ' + pairCode() + ' · מאשרים בממשק הניהול'
+    : '';
+}
+
+// ════════════════════════════════════════════════════════════
+// Preview (player.html?preview=1, inside the panel's add/edit form)
+// ════════════════════════════════════════════════════════════
+function startPreview() {
+  window.addEventListener('message', e => {
+    if (e.origin !== location.origin || !e.data || e.data.kind !== 'kiosk-preview') return;
+    showPreview(e.data.item || {});
+  });
+  parent.postMessage({ kind: 'kiosk-preview-ready' }, location.origin);
+}
+
+function showPreview(src) {
+  const item = {
+    id: 'preview-' + Date.now(), title: '', type: src.type,
+    heading: src.heading || '', text: src.text || ''
+  };
+  const variant = item.type === 'notice' ? 'notice' : item.type === 'error' ? 'err' : 'slide';
+  stopCurrent();
+  S.currentId = item.id;
+  const stage = $('stage');
+  stage.innerHTML = '';
+  renderTextItem(stage, item, variant);
 }
 
 // ════════════════════════════════════════════════════════════
@@ -651,6 +738,7 @@ function renderItem(item) {
 // If an item never starts, move on (or retry when it's the only one) instead of
 // sitting on it. Renderers that swap sources re-arm this for each attempt.
 function armLoadTimeout(item, ms) {
+  if (PREVIEW) return;
   clearTimeout(S.loadTimer);
   S.loadTimer = setTimeout(() => {
     if (S.currentId !== item.id) return;
@@ -816,6 +904,7 @@ function armLoopExit(item, videoLength) {
 function armTimers(item) {
   clearTimeout(S.advanceTimer); S.advanceTimer = null;
   clearTimeout(S.safetyTimer);  S.safetyTimer = null;
+  if (PREVIEW) return;   // a preview stays put until the panel sends the next one
   const def = (S.settings && S.settings.defaultDuration) || 60;
   const loops = loopsOf(item);
 
@@ -954,7 +1043,7 @@ function renderTextItem(stage, item, variant) {
     }
   };
   sizeText();
-  // Simpler may still be downloading; its metrics differ from the fallback.
+  // The web font may still be downloading; its metrics differ from the fallback.
   if (document.fonts && document.fonts.ready) {
     document.fonts.ready.then(() => { if (S.currentId === item.id) sizeText(); });
   }
@@ -1197,12 +1286,29 @@ function ytId(url) {
   return m ? m[1] : null;
 }
 
+// The API script is loaded once and shared. If it fails (a network blip at the
+// wrong moment) the attempt is thrown away, so the next YouTube item tries
+// again — a promise left pending here would silently break every YouTube item
+// until the nightly reload.
 function loadYtApi() {
   if (S.ytApiPromise) return S.ytApiPromise;
-  S.ytApiPromise = new Promise(resolve => {
+  S.ytApiPromise = new Promise((resolve, reject) => {
     if (window.YT && window.YT.Player) return resolve();
-    window.onYouTubeIframeAPIReady = () => resolve();
     const s = document.createElement('script');
+    let over = false;
+    const giveUp = () => {
+      if (over) return;   // the timeout and onerror can both fire
+      over = true;
+      clearTimeout(timer);
+      s.remove();
+      S.ytApiPromise = null;
+      // A half-loaded API marks itself as loading and would never retry.
+      if (!(window.YT && window.YT.Player)) { try { delete window.YT; } catch (_) { window.YT = undefined; } }
+      reject(new Error('YouTube API did not load'));
+    };
+    const timer = setTimeout(giveUp, YT_API_TIMEOUT_MS);
+    window.onYouTubeIframeAPIReady = () => { over = true; clearTimeout(timer); resolve(); };
+    s.onerror = giveUp;
     s.src = 'https://www.youtube.com/iframe_api';
     document.head.appendChild(s);
   });
@@ -1217,7 +1323,12 @@ async function renderYouTube(stage, item) {
   holder.id = 'yt-' + Date.now();
   stage.appendChild(holder);
 
-  await loadYtApi();
+  try {
+    await loadYtApi();
+  } catch (_) {
+    if (S.currentId === item.id) failSkip(0, 'הנגן של יוטיוב לא נטען (בעיית רשת?)');
+    return;
+  }
   if (S.currentId !== item.id) return; // rotation moved on while the API loaded
   const wantCover = fitFor(item) === 'cover';
   const muted = !!(S.settings && S.settings.muted);
@@ -1452,6 +1563,7 @@ cornerTaps('filesCorner', openFiles);
 // Resilience
 // ════════════════════════════════════════════════════════════
 async function requestWakeLock() {
+  if (PREVIEW) return;   // the preview lives inside the panel on someone's phone
   try {
     if ('wakeLock' in navigator) S.wakeLock = await navigator.wakeLock.request('screen');
   } catch (_) {}

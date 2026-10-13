@@ -1,0 +1,5 @@
+# Local secrets — never committed.
+.env
+
+# Studio source artwork (the trimmed copies live in assets/).
+source-art/

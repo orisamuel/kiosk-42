@@ -5,9 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#0d0f14">
 <title>הקיוסק של 42 — ניהול</title>
-<link rel="stylesheet" href="styles.css">
-<script src="config.js"></script>
-<script src="utils.js"></script>
+<!-- ?v= busts the browser cache — bump it when these files change (see player.html). -->
+<link rel="stylesheet" href="styles.css?v=2">
+<script src="config.js?v=2"></script>
+<script src="utils.js?v=2"></script>
 <style>
   /* ── Page-specific ── */
   .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
@@ -46,7 +47,9 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .pl-bottom { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-  .pl-meta { font-size: 0.8rem; color: var(--text-secondary); flex: 1; }
+  .pl-meta { font-size: 0.8rem; color: var(--text-secondary); flex: 1 1 100%; }
+  /* The actions share one even row under the meta line, phone width included. */
+  .pl-bottom .icon-btn { flex: 1; padding: 6px 0; max-width: 64px; }
   .badge {
     font-size: 0.72rem; font-weight: 600;
     padding: 2px 8px; border-radius: var(--radius-pill);
@@ -153,6 +156,29 @@
   .check-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
   .check-row input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--accent); }
 
+  /* A tall form (text + preview) must scroll inside the modal on a phone. */
+  .modal { max-height: calc(100vh - 40px); max-height: calc(100dvh - 40px); overflow-y: auto; }
+
+  /* ── Live preview of a text board ──
+     The player itself, in preview mode, at the screen's real 1080×1920 and
+     scaled down — so line breaks and text size match the wall exactly. */
+  .preview-box {
+    position: relative; overflow: hidden;
+    width: 162px; height: 288px;          /* 1080×1920 × 0.15 */
+    margin: 0 auto;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--glass-border);
+    background: var(--bg-elevated);
+  }
+  .preview-box iframe {
+    position: absolute; top: 0; left: 0;
+    width: 1080px; height: 1920px; border: 0;
+    transform: scale(0.15); transform-origin: 0 0;
+    pointer-events: none;
+  }
+
+  .status-line .btn { padding: 6px 12px; font-size: 0.85rem; margin-inline-start: auto; flex-shrink: 0; }
+
   .section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
   .hint { font-size: 0.78rem; color: var(--text-muted); margin-top: 4px; }
   .card + .card { margin-top: 16px; }
@@ -179,6 +205,23 @@
     <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">🌙</button>
   </header>
 
+  <!-- ── No access code on this device ── -->
+  <div class="card" id="lockCard" style="display:none; margin-top: 16px;">
+    <h2 style="font-size:1.1rem; margin-bottom:8px;">🔒 אין גישה מהמכשיר הזה</h2>
+    <p class="hint" style="margin-bottom:14px;">
+      הדרך הקלה: לפתוח את קישור הגישה. מי שכבר מחובר שולח אותו מ"שיתוף גישה" בתחתית העמוד.
+      אפשר גם להדביק כאן את קוד הגישה.
+    </p>
+    <div class="form-group">
+      <input class="form-input" id="keyInput" type="text" dir="ltr" autocomplete="off"
+             autocapitalize="off" spellcheck="false" placeholder="קוד גישה"
+             onkeydown="if (event.key === 'Enter') submitKey()">
+    </div>
+    <button class="btn btn-primary" style="width:100%;" onclick="submitKey()">כניסה</button>
+  </div>
+
+  <div id="appBody">
+
   <!-- ── Kiosk status ── -->
   <div class="card" style="margin-top: 16px;">
     <div class="status-line">
@@ -187,6 +230,8 @@
     </div>
     <div class="status-line" id="failLine"
          style="display:none; margin-top:8px; color:var(--danger); font-size:0.85rem;"></div>
+    <!-- A screen with no access code yet, asking to be let in. -->
+    <div class="status-line" id="pairLine" style="display:none; margin-top:8px; font-size:0.85rem;"></div>
     <div class="toolbar">
       <button class="btn btn-primary" onclick="openAddModal()">➕ הוספת פריט</button>
       <button class="btn btn-secondary" onclick="refreshKiosk()" id="refreshBtn">🔄 רענון המסך</button>
@@ -263,7 +308,11 @@
       </div>
     </div>
     <button class="btn btn-primary" style="width:100%; margin-top:8px;" onclick="saveSettings()" id="saveSettingsBtn">💾 שמירת הגדרות</button>
+    <button class="btn btn-secondary" style="width:100%; margin-top:10px;" onclick="shareAccess()">🔗 שיתוף גישה לנייד נוסף</button>
+    <div class="hint" style="text-align:center;">מי שפותח את הקישור יכול לשנות את מה שמוצג על המסך</div>
   </div>
+
+  </div><!-- /appBody -->
 
 </div>
 
@@ -295,7 +344,8 @@
       </div>
       <div class="form-group" id="textGroup" style="display:none;">
         <label class="form-label" id="textLabel">הטקסט</label>
-        <textarea class="form-textarea" id="fText" rows="5" placeholder="הטקסט שיוצג על המסך..."></textarea>
+        <textarea class="form-textarea" id="fText" rows="5" placeholder="הטקסט שיוצג על המסך..."
+                  oninput="schedulePreview()"></textarea>
         <div class="hint" id="textHint"></div>
       </div>
       <div class="form-group" id="localGroup" style="display:none;">
@@ -311,8 +361,13 @@
       </div>
       <div class="form-group" id="headingGroup" style="display:none;">
         <label class="form-label">כותרת על המסך (אופציונלי)</label>
-        <input class="form-input" id="fHeading" type="text" placeholder="בלי כותרת — יוצג רק הטקסט">
+        <input class="form-input" id="fHeading" type="text" placeholder="בלי כותרת — יוצג רק הטקסט"
+               oninput="schedulePreview()">
         <div class="hint">אם משאירים ריק, המסך יציג את הטקסט לבד, בלי כותרת.</div>
+      </div>
+      <div class="form-group" id="previewGroup" style="display:none;">
+        <label class="form-label">כך זה ייראה על המסך</label>
+        <div class="preview-box"><iframe id="previewFrame" tabindex="-1" aria-hidden="true"></iframe></div>
       </div>
       <div class="form-group">
         <label class="form-label">שם (לתצוגה ברשימה)</label>
@@ -442,31 +497,129 @@ let settings = null;
 let editingId = null;
 let currentType = null;   // the type chosen in the add/edit modal
 
+adoptKeyFromHash();
 warmupServer();
 
-(async function init() {
-  updateLoadingProgress('טוען פלייליסט...');
+// Last server state, kept on this device so the panel opens instantly and
+// catches up in the background — the server takes a few seconds per call.
+const PANEL_CACHE = 'kioskPanelCache';
+
+function readPanelCache() {
   try {
-    await loadAll();
-  } catch (e) {
-    showToast(e.message, 'error');
-    document.getElementById('playlist').innerHTML =
-      '<p style="color:var(--danger);">שגיאה בטעינה: ' + e.message + '</p>';
-  } finally {
-    hideLoadingScreen();
+    const c = JSON.parse(localStorage.getItem(PANEL_CACHE) || 'null');
+    return c && Array.isArray(c.items) && c.settings ? c : null;
+  } catch (_) { return null; }
+}
+
+function writePanelCache() {
+  try { localStorage.setItem(PANEL_CACHE, JSON.stringify({ items, settings })); } catch (_) {}
+}
+
+// Settings inputs are filled from the server only until the user touches one.
+let settingsTouched = false;
+
+(async function init() {
+  document.querySelectorAll('#setName, #setIdleMessage, #setRefresh, #setGap, #setDefault, ' +
+                            '#setReloadHour, #setVideoFit, #setMuted, #setClock')
+    .forEach(el => el.addEventListener('input', () => { settingsTouched = true; }));
+
+  const cached = getAccessKey() ? readPanelCache() : null;
+  if (cached) {
+    items = cached.items;
+    settings = cached.settings;
+    renderList();
+    fillSettings();
+    hideLoadingScreen(0);
+  } else {
+    updateLoadingProgress('טוען פלייליסט...');
   }
-  await loadDeviceFiles();
+  loadDeviceFiles();
+  // Both calls at once: each one is a few seconds on Apps Script.
   refreshStatus();
+  try {
+    await loadAll({ initial: true });
+  } catch (e) {
+    if (e instanceof AccessError) {
+      // showLock() has already taken over the page.
+    } else if (!cached) {
+      showToast(e.message, 'error');
+      document.getElementById('playlist').innerHTML =
+        '<p style="color:var(--danger);">שגיאה בטעינה: ' + esc(e.message) + '</p>';
+    } else {
+      showToast('אין חיבור לשרת כרגע · מוצג המצב האחרון שנשמר', 'warning', 6000);
+    }
+  } finally {
+    hideLoadingScreen(cached ? 0 : 400);
+  }
   setInterval(refreshStatus, 30000);
 })();
 
-async function loadAll() {
-  const res = await apiCall('getPlaylist');
+// The server said this device has no (valid) code.
+class AccessError extends Error {}
+
+function checkAccess(res) {
+  if (res && res.auth) { showLock(); throw new AccessError('אין גישה'); }
+  return res;
+}
+
+function showLock() {
+  document.getElementById('appBody').style.display = 'none';
+  document.getElementById('lockCard').style.display = '';
+  hideLoadingScreen(0);
+}
+
+async function submitKey() {
+  const input = document.getElementById('keyInput');
+  const k = input.value.trim().replace(/^.*#key=/, '');   // a pasted link works too
+  if (!k) return;
+  setAccessKey(k);
+  try {
+    const res = await apiCall('getStatus');
+    if (res.auth) {
+      setAccessKey('');
+      return showToast('הקוד לא נכון', 'error');
+    }
+  } catch (e) {
+    return showToast('אין חיבור לשרת: ' + e.message, 'error');
+  }
+  input.value = '';
+  document.getElementById('lockCard').style.display = 'none';
+  document.getElementById('appBody').style.display = '';
+  showToast('מחובר ✓', 'success');
+  refreshStatus();
+  loadAll().catch(e => showToast(e.message, 'error'));
+}
+
+// Hand this device's access on as a link (WhatsApp, mail…). The code rides in
+// the #fragment, which browsers never send to any server.
+async function shareAccess() {
+  const key = getAccessKey();
+  if (!key) return showToast('למכשיר הזה אין קוד גישה לשתף', 'warning');
+  const link = location.origin + location.pathname + '#key=' + encodeURIComponent(key);
+  if (navigator.share) {
+    try { await navigator.share({ title: 'גישה לניהול ' + CONFIG.APP_NAME, url: link }); return; }
+    catch (e) { if (e.name === 'AbortError') return; }
+  }
+  try {
+    await navigator.clipboard.writeText(link);
+    showToast('קישור הגישה הועתק', 'success');
+  } catch (_) {
+    prompt('קישור הגישה:', link);
+  }
+}
+
+// `initial`: the first load after opening from cache. The user may already have
+// changed something by the time it lands — then their version stands (the
+// queue reconciles once it drains) and the settings form is left alone.
+async function loadAll(opts = {}) {
+  const res = checkAccess(await apiCall('getPlaylist'));
   if (!res.success) throw new Error(res.message || 'שגיאה');
+  if (opts.initial && (pendingOps > 0 || drag)) return;
   items = res.items;
   settings = res.settings;
+  writePanelCache();
   renderList();
-  fillSettings();
+  if (!opts.initial || !settingsTouched) fillSettings();
 }
 
 // Refresh state from the server without touching the loading screen or the
@@ -474,11 +627,12 @@ async function loadAll() {
 async function loadAllQuiet() {
   if (drag) return;                    // never fight an active drag
   try {
-    const res = await apiCall('getPlaylist');
+    const res = checkAccess(await apiCall('getPlaylist'));
     if (!res.success) return;
     if (pendingOps > 0) return;        // stale — newer writes are still in flight
     items = res.items;
     settings = res.settings;
+    writePanelCache();
     renderList();
   } catch (_) {}
 }
@@ -569,6 +723,7 @@ function renderList() {
         <span class="pl-meta">${meta.label} · ${dur}${it.fit ? ' · ' + (it.fit === 'cover' ? 'מלא מסך' : 'שלם') : ''}</span>
         <button class="icon-btn" title="למעלה" onclick="move('${it.id}','up')" ${i === 0 ? 'disabled' : ''}>▲</button>
         <button class="icon-btn" title="למטה" onclick="move('${it.id}','down')" ${i === items.length - 1 ? 'disabled' : ''}>▼</button>
+        <button class="icon-btn" title="הצגה עכשיו על המסך" onclick="showNow('${it.id}')" ${dis}>📺</button>
         <button class="icon-btn" title="${it.active ? 'השבתה' : 'הפעלה'}" onclick="toggleActive('${it.id}')" ${dis}>${it.active ? '⏸' : '▶'}</button>
         <button class="icon-btn" title="עריכה" onclick="openEditModal('${it.id}')" ${dis}>✏️</button>
         <button class="icon-btn" title="מחיקה" onclick="removeItem('${it.id}')" ${dis}>🗑️</button>
@@ -893,7 +1048,11 @@ function updateTypeFields() {
     fillLocalPicker();
     loadDeviceFiles().then(() => { drawDeviceList(); drawDeviceHint(); });
   }
+  document.getElementById('previewGroup').style.display = isText ? '' : 'none';
   if (isText) {
+    // Deferred: the modal may not be open yet, and a board laid out inside a
+    // hidden frame would measure zero and size its text wrong.
+    schedulePreview();
     document.getElementById('textLabel').textContent = type === 'notice' ? 'תוכן ההודעה' : 'הטקסט';
     document.getElementById('textHint').textContent = type === 'error'
       ? 'הטקסט יוצג בפס העליון של לוח ה-ERROR, מעל הרובוט.'
@@ -914,6 +1073,40 @@ function updateTypeFields() {
     typeHint.textContent = '';
   }
 }
+
+// ── Live preview of a text board ──
+// The frame runs player.html in preview mode (loaded the first time a text
+// type is picked) and draws whatever we post to it with the screen's own code,
+// so what is seen here is what the wall will show.
+let previewReady = false;
+let previewTimer = null;
+
+function schedulePreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(updatePreview, 150);
+}
+
+function updatePreview() {
+  if (!isTextItem(currentType)) return;
+  const frame = document.getElementById('previewFrame');
+  if (!frame.getAttribute('src')) { frame.src = 'player.html?preview=1'; return; }   // posts on ready
+  if (!previewReady) return;
+  frame.contentWindow.postMessage({
+    kind: 'kiosk-preview',
+    item: {
+      type: currentType,
+      // Trimmed exactly as saveItem() stores them.
+      heading: document.getElementById('fHeading').value.trim(),
+      text: document.getElementById('fText').value.trim()
+    }
+  }, location.origin);
+}
+
+window.addEventListener('message', e => {
+  if (e.origin !== location.origin || !e.data || e.data.kind !== 'kiosk-preview-ready') return;
+  previewReady = true;
+  updatePreview();
+});
 
 // Repeats are seamless on a real video file (the browser loops it in about a
 // frame) but NOT on YouTube: its player reloads the video between passes, which
@@ -1239,24 +1432,18 @@ async function refreshKiosk() {
     let bootBefore = '';
     try { bootBefore = (await apiCall('getStatus')).boot || ''; } catch (_) {}
 
-    const res = await apiCall('refreshKiosk');
+    const res = checkAccess(await apiCall('refreshKiosk'));
     if (!res.success) return showToast(res.message, 'error');
 
     const every = (settings && settings.refreshSeconds) || 60;
     showToast('נשלחה בקשת ריענון — המסך יגיב בבדיקה הבאה שלו (עד ' + every + ' שניות)', 'info', 6000);
 
-    // Poll until the screen reports a new page load, up to its check-in window.
-    const deadline = Date.now() + (every + 25) * 1000;
-    while (Date.now() < deadline) {
-      btn.textContent = '⏳ ממתין למסך...';
-      await new Promise(r => setTimeout(r, 5000));
-      let st = null;
-      try { st = await apiCall('getStatus'); } catch (_) { continue; }
-      if (st && st.boot && st.boot !== bootBefore) {
-        showToast('המסך התרענן ✓', 'success');
-        loadAllQuiet();
-        return;
-      }
+    // Wait for the screen to report a new page load, up to its check-in window.
+    btn.textContent = '⏳ ממתין למסך...';
+    if (await waitForScreen(st => st.boot && st.boot !== bootBefore, every + 25)) {
+      showToast('המסך התרענן ✓', 'success');
+      loadAllQuiet();
+      return;
     }
     showToast('המסך עוד לא דיווח על ריענון — ייתכן שהנגן סגור או שאין לו רשת', 'warning', 8000);
   } catch (e) {
@@ -1271,13 +1458,17 @@ async function refreshStatus() {
   const dot = document.getElementById('statusDot');
   const text = document.getElementById('statusText');
   try {
-    const res = await apiCall('getStatus');
+    const res = checkAccess(await apiCall('getStatus'));
     if (!res.success) throw new Error(res.message);
     kioskBoot = res.boot || '';
     showScreenFailure(res.fail);
+    showPairRequest(res.pending);
     if (Array.isArray(res.files)) {
       kioskFiles = res.files;
-      renderList();   // the "file not on the screen" badges depend on this
+      // The "file not on the screen" badges depend on this. Mid-drag the list
+      // is left alone — redrawing it would orphan the dragged row and show it
+      // twice; endDrag() redraws anyway.
+      if (!drag) renderList();
       if (currentType === 'local' &&
           document.getElementById('itemModal').classList.contains('open')) {
         fillLocalPicker();
@@ -1301,6 +1492,76 @@ async function refreshStatus() {
   } catch (e) {
     dot.className = 'status-dot';
     text.textContent = 'לא ניתן לבדוק את מצב המסך';
+  }
+}
+
+// ── Pairing a screen ───────────────────────────────────────
+// A screen without the access code keeps playing what it last had and asks to
+// be let in. Its code (last 5 characters) is on its waiting board, so the
+// request can be matched to the actual screen before approving.
+const PAIR_FRESH_MS = 3 * 60 * 1000;
+
+function showPairRequest(p) {
+  const el = document.getElementById('pairLine');
+  const fresh = p && p.boot && p.boot !== kioskBoot && Date.now() - p.ts < PAIR_FRESH_MS;
+  if (!fresh) { el.style.display = 'none'; return; }
+  el.style.display = '';
+  el.innerHTML = '<span>📺 מסך מבקש חיבור · קוד <b dir="ltr">' + esc(p.boot.slice(-5)) +
+    '</b> (מופיע על מסך ההמתנה שלו)</span>' +
+    '<button class="btn btn-primary" data-boot="' + esc(p.boot) + '" ' +
+    'onclick="approveScreen(this.dataset.boot, this)">חיבור</button>';
+}
+
+async function approveScreen(boot, btn) {
+  btn.disabled = true;
+  try {
+    const res = checkAccess(await apiCall('approveScreen', { boot }));
+    if (!res.success) throw new Error(res.message || 'שגיאה');
+  } catch (e) {
+    btn.disabled = false;
+    return showToast(e.message, 'error');
+  }
+  btn.textContent = '⏳ ממתין למסך...';
+  const every = (settings && settings.refreshSeconds) || 60;
+  const ok = await waitForScreen(st => st.boot === boot, every + 25);
+  showToast(ok ? 'המסך חובר ✓' : 'המסך עוד לא התחבר · אם הנגן פתוח, זה יקרה בבדיקה הבאה שלו',
+            ok ? 'success' : 'warning', 7000);
+  refreshStatus();
+}
+
+// Poll the screen's status until `test(status)` holds or `seconds` pass.
+async function waitForScreen(test, seconds) {
+  const deadline = Date.now() + seconds * 1000;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 5000));
+    let st = null;
+    try { st = await apiCall('getStatus'); } catch (_) { continue; }
+    if (st && st.success && test(st)) return st;
+  }
+  return null;
+}
+
+// ── Show now ───────────────────────────────────────────────
+// The screen picks the request up on its next check-in and jumps straight to
+// the item (an inactive one plays once). We wait to see it actually happen.
+async function showNow(id) {
+  const it = items.find(x => x.id === id);
+  if (!it || it.pending) return;
+  let res;
+  try { res = checkAccess(await apiCall('showNow', { id })); }
+  catch (e) { return showToast(e.message, 'error'); }
+  if (!res.success) {
+    return showToast(/Unknown action/i.test(res.message || '')
+      ? 'כדי להשתמש בזה צריך לפרוס גרסה חדשה של ה-Apps Script' : (res.message || 'שגיאה'), 'error');
+  }
+  const every = (settings && settings.refreshSeconds) || 60;
+  showToast('נשלח · המסך יעבור ל"' + esc(it.title) + '" בבדיקה הבאה שלו (עד ' + every + ' שניות)', 'info', 6000);
+  const st = await waitForScreen(s => s.item === it.title, every + 25);
+  if (st) {
+    showToast('המסך מציג עכשיו: ' + esc(it.title) + ' ✓', 'success');
+    refreshStatus();
+  } else {
+    showToast('המסך עוד לא עבר לפריט · ייתכן שהנגן סגור או שאין לו רשת', 'warning', 8000);
   }
 }
 
