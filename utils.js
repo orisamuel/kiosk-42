@@ -92,7 +92,15 @@ function showToast(message, type = 'info', duration = 3500) {
     const toast = document.createElement('div');
     toast.className = 'toast toast-' + type;
     const icons = { success: '✓', error: '✕', warning: '⚠', info: 'ℹ' };
-    toast.innerHTML = `<span class="toast-icon">${icons[type] || 'ℹ'}</span><span class="toast-msg">${message}</span>`;
+    // Plain text only: messages carry server replies and other sites' headers
+    // (checkEmbed), and this page holds the device key.
+    const icon = document.createElement('span');
+    icon.className = 'toast-icon';
+    icon.textContent = icons[type] || 'ℹ';
+    const msg = document.createElement('span');
+    msg.className = 'toast-msg';
+    msg.textContent = String(message);
+    toast.append(icon, msg);
     container.appendChild(toast);
     requestAnimationFrame(() => toast.classList.add('toast-show'));
     setTimeout(() => {
@@ -147,13 +155,18 @@ function deviceLabel() {
 }
 
 // An old access link (…#key=CODE, the shared code from before device keys).
-// Kept, so the device can trade it for a key of its own while the server still
-// accepts it; wiped from the address bar either way.
+// Wiped from the address bar either way, and taken only by a device with no
+// key yet, only while the server may still accept it, and only if it is short
+// like that code: never over a working device key, and never a key someone
+// else chose for this device.
+const LEGACY_UNTIL_MS = Date.parse('2026-10-21T00:00:00+03:00');
 function adoptKeyFromHash() {
     const m = location.hash.match(/[#&]key=([^&]+)/);
     if (!m) return false;
-    setAccessKey(decodeURIComponent(m[1]));
     history.replaceState(null, '', location.pathname + location.search);
+    const code = decodeURIComponent(m[1]);
+    if (getAccessKey() || code.length >= 32 || Date.now() >= LEGACY_UNTIL_MS) return false;
+    setAccessKey(code);
     return true;
 }
 

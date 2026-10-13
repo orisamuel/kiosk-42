@@ -141,8 +141,11 @@ export function makeBackend({ log = () => {}, source = path.join(ROOT, 'appscrip
   const src = fs.readFileSync(source, 'utf8');
   const swapped = src.replace(/const KEY_HASH = '[0-9a-f]{64}';/, `const KEY_HASH = '${sha256(LEGACY_TEST)}';`);
   if (swapped === src) throw new Error('KEY_HASH line not found in appscript.gs');
-  vm.runInContext(swapped + '\n;globalThis.__api = { doGet, doPost };', ctx, { filename: 'appscript.gs' });
+  vm.runInContext(swapped + "\n;globalThis.__api = { doGet, doPost, ownerInvite: typeof ownerInvite === 'function' ? ownerInvite : null };",
+                  ctx, { filename: 'appscript.gs' });
   const api = ctx.__api;
+  const logged = [];
+  ctx.Logger.log = (...a) => { logged.push(a.join(' ')); log('[gs] ' + a.join(' ')); };
 
   // One request, as Apps Script would hand it over: query + form body merged
   // into e.parameter.
@@ -169,7 +172,8 @@ export function makeBackend({ log = () => {}, source = path.join(ROOT, 'appscrip
                   'הפלייליסט כאן מדומה ולא נוגע במסך במשרד', '']);
   }
 
-  return { call, request, seed, clock, sheets, propMap, cacheMap, outbox };
+  return { call, request, seed, clock, sheets, propMap, cacheMap, outbox, logged,
+           ownerInvite: () => api.ownerInvite && api.ownerInvite() };
 }
 
 // ── The local server ──
@@ -184,6 +188,9 @@ function serve(port) {
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1');
     const send = (code, type, body) => { res.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-store' }); res.end(body); };
+    // Only this machine, by its own name (a page elsewhere can't rebind a DNS
+    // name onto 127.0.0.1 and read the project through it).
+    if (!/^(127\.0\.0\.1|localhost):\d+$/.test(req.headers.host || '')) return send(403, 'text/plain', 'forbidden');
     if (url.pathname === '/exec') {
       let body = '';
       for await (const chunk of req) body += chunk;
@@ -198,10 +205,16 @@ function serve(port) {
         devices, playlist: pl ? pl.rows : [], formulasWritten: pl ? pl.formulas : []
       }, null, 2));
     }
-    const rel = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname).replace(/^\/+/, '');
+    let rel;
+    try { rel = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname).replace(/^\/+/, ''); }
+    catch (_) { return send(400, 'text/plain', 'bad path'); }
     const file = path.resolve(ROOT, rel);
-    // Inside the project only, and never a dotfile (.env, .git, .clasp.json…).
-    if (!file.startsWith(ROOT + path.sep) || rel.split('/').some(seg => seg.startsWith('.'))) return send(404, 'text/plain', 'not found');
+    // Inside the project only, and never a dotfile (.env, .git, .clasp.json…):
+    // no backslashes, drive letters or Windows short names (ENV~1), and every
+    // segment of the resolved path checked, not just the URL's.
+    const inside = path.relative(ROOT, file);
+    if (/[\\:~\0]/.test(rel) || !file.startsWith(ROOT + path.sep) ||
+        inside.split(path.sep).some(seg => !seg || seg.startsWith('.'))) return send(404, 'text/plain', 'not found');
     fs.readFile(file, (err, data) => {
       if (err) return send(404, 'text/plain', 'not found');
       if (rel === 'config.js') {

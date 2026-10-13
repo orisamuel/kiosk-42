@@ -69,11 +69,26 @@
     margin-top: 4vmin;
   }
   #fbHint { font-size: 2.4vmin; font-weight: 600; color: #E5187F; margin-top: 2vmin; }
-  /* The pairing code, big enough to read off the wall from across the room. */
-  #fbHint .pairCode {
-    display: block; margin: 1.2vmin 0;
-    font-size: 8vmin; font-weight: 800; letter-spacing: 0.06em;
-    color: #2E0B33; direction: ltr; font-variant-numeric: tabular-nums;
+
+  /* ── Not connected: the pairing code ──
+     Above everything, content included: a disconnected screen keeps playing
+     its last playlist, and the code must not wait for a gap between items.
+     Big enough to read off the wall from across the room. */
+  #pairBar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 25;
+    display: none; align-items: center; justify-content: center; gap: 3vmin;
+    padding: 2vmin 3vmin;
+    background: #2E0B33; color: #fff;
+    direction: rtl; text-align: center;
+    font-family: inherit; font-size: 2.4vmin; font-weight: 700;
+    pointer-events: none;
+  }
+  #pairBar.show { display: flex; }
+  #pairBar .pairSay { font-size: 2.8vmin; line-height: 1.3; }
+  #pairBar .pairCode {
+    flex-shrink: 0; white-space: nowrap;
+    font-size: 7vmin; font-weight: 800; letter-spacing: 0.06em; line-height: 1;
+    color: #F0A03C; direction: ltr; font-variant-numeric: tabular-nums;
   }
 
   /* ── Content stage ──
@@ -294,6 +309,7 @@
 <div id="errBoard"></div>
 
 <div id="swipeHint"></div>
+<div id="pairBar"></div>
 <div id="clockPill">--:--</div>
 <div id="offlineDot"></div>
 
@@ -507,6 +523,7 @@ async function poll() {
   await refreshLocalNames();
   // A screen's first run: a key of its own, to be approved from the panel.
   if (!getAccessKey()) setAccessKey(newDeviceKey());
+  const sentKey = getAccessKey();
   try {
     const res = await apiCall('getPlaylist', {
       current: S.currentTitle || 'מסך המתנה',
@@ -532,10 +549,11 @@ async function poll() {
       // Not connected. The screen keeps playing the last playlist it knew and
       // shows a code to type into the panel, checking back often so it starts
       // soon after. A key the server won't even consider (the old shared code,
-      // once retired) is replaced, so the next check gets a code.
+      // once retired) is replaced, so the next check gets a code — unless the
+      // panel on this same device connected it with a new key meanwhile.
       S.failStreak = 0;
       S.awaitingPair = true;
-      if (res.auth === 'denied') { setAccessKey(newDeviceKey()); S.quickPoll = true; }
+      if (res.auth === 'denied' && getAccessKey() === sentKey) { setAccessKey(newDeviceKey()); S.quickPoll = true; }
       setPairHint(res);
     } else {
       S.failStreak++;
@@ -639,19 +657,22 @@ function handleShowNow(settings, allItems) {
   S.quickPoll = true;      // report the new item right away, for the panel
 }
 
-// The waiting board's line while the screen isn't connected: its 6-digit code,
-// big, to be typed into the panel ("מכשירים מחוברים" ▸ "חיבור מסך").
+// The bar along the bottom while the screen isn't connected: its 6-digit code,
+// to be typed into the panel ("מכשירים מחוברים" ▸ "חיבור מסך").
 function setPairHint(res) {
-  const el = $('fbHint');
+  const el = $('pairBar');
   el.textContent = '';
+  el.classList.toggle('show', !!res);
   if (!res) return;
   const code = String(res.code || '');
   if (/^\d{6}$/.test(code)) {
-    el.append('המסך ממתין לחיבור · הקוד:');
     const big = document.createElement('span');
     big.className = 'pairCode';
     big.textContent = code.slice(0, 3) + ' ' + code.slice(3);
-    el.append(big, 'מקלידים אותו בממשק הניהול, ב"מכשירים מחוברים"');
+    const say = document.createElement('span');
+    say.className = 'pairSay';
+    say.textContent = 'המסך ממתין לחיבור · מקלידים את הקוד בדף הניהול';
+    el.append(say, big);
   } else {
     const msg = res.message || 'מנסה שוב בעוד רגע';
     el.textContent = /^המסך/.test(msg) ? msg : 'המסך ממתין לחיבור · ' + msg;
@@ -1094,6 +1115,12 @@ function httpsUrl(item) { return /^https:\/\/[^\s]/i.test(String(item.url || '')
 function renderWebsite(stage, item) {
   if (!httpsUrl(item)) { failSkip(0, NOT_HTTPS); return; }
   const f = document.createElement('iframe');
+  // A page from this same site (any orisamuel.github.io address) would share
+  // this page's storage, the device key included. It runs sandboxed instead,
+  // in an origin of its own.
+  let sameOrigin = false;
+  try { sameOrigin = new URL(item.url).origin === location.origin; } catch (_) {}
+  if (sameOrigin) f.setAttribute('sandbox', 'allow-scripts allow-forms allow-popups');
   f.setAttribute('allow', 'autoplay; fullscreen; encrypted-media');
   f.setAttribute('allowfullscreen', '');
   f.addEventListener('load', () => markReady(item));
@@ -1525,7 +1552,7 @@ async function drawFiles() {
     <div class="fRow">
       <span class="fName">${(f.type || '').indexOf('image/') === 0 ? '🖼️' : '🎬'} ${escapeHtml(f.name)}</span>
       <span class="fMeta">${fmtSize(f.size || 0)}</span>
-      <button class="fBtn" onclick="removeFile('${escapeHtml(f.name).replace(/'/g, "\\'")}')">מחיקה</button>
+      <button class="fBtn" data-name="${escapeHtml(f.name)}" onclick="removeFile(this.dataset.name)">מחיקה</button>
     </div>`).join('');
 }
 

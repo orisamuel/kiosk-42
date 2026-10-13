@@ -29,27 +29,38 @@ const SHEET_ID = '1sBuKpJyIpA_yZzQB0zIo9zQaM1Yb-ZZpE638tQRk3d4';
 //   • an invite link made in a connected panel (one use, 24 hours);
 //   • a 6-digit code emailed to the script owner (10 minutes, 5 tries);
 //   • the screen: the code on its waiting board, typed into a connected panel.
-// Requests are POST with a form body, so a key never sits in a URL.
+// Requests are POST with a form body, so a key never sits in a URL. The owner
+// gets an email whenever a device joins by invite or screen code. If no
+// connected phone is at hand, ownerInvite() in the editor logs a fresh invite.
 //
 // Run setupMail() once from the editor after the first deploy of this: Google
-// asks for the permission to send the emailed codes.
+// asks for the permission to send the emails.
 // ============================================================
 
 // The single shared code used before device keys. Until LEGACY_UNTIL it still
 // works, so a device holding it can trade it for a key of its own (the panel
-// and the screen do that by themselves on their next call). After that it
-// opens nothing, and KEY_HASH and KIOSK_KEY in .env can be deleted.
+// and the screen do that by themselves on their next call). `retireLegacy`
+// (from a connected phone) ends it sooner. After that it opens nothing, and
+// KEY_HASH and KIOSK_KEY in .env can be deleted.
 const KEY_HASH = '79484da10a11feccd1c377da9bd0c25350454ea0b96185054f8184573ab7e52a';
 const LEGACY_UNTIL = new Date('2026-10-21T00:00:00+03:00').getTime();
 
 const MIN_KEY_LEN    = 32;
 const PAIR_TTL_MS    = 10 * 60 * 1000;      // emailed code
 const PAIR_MAX_TRIES = 5;
-const PAIR_PER_DAY   = 6;                   // emails, per 6-hour cache window
+const PAIR_GAP_MS    = 60 * 1000;           // one emailed code a minute
+const PAIR_WINDOW_MS = 6 * 60 * 60 * 1000;  // …and PAIR_PER_WINDOW per 6 hours
+const PAIR_PER_WINDOW = 6;
 const INVITE_TTL_MS  = 24 * 60 * 60 * 1000;
 const SCREEN_REQ_TTL = 600;                 // seconds a waiting screen's code lives
-const SCREEN_REQ_MAX = 20;                  // new screen requests per 10 minutes
+const SCREEN_REQ_MAX = 100;                 // new screen requests per 10 minutes
 const SEEN_EVERY_MS  = 60 * 60 * 1000;      // "last seen" is written at most hourly
+const SITE_URL       = 'https://orisamuel.github.io/kiosk-42/';
+
+// Managing devices is for phones. The screen's key is the most exposed one
+// (it sits on a wall, and its panel opens from a hidden corner), so it can
+// change what plays but can't let anyone else in.
+const PHONE_ONLY = ['listDevices', 'removeDevice', 'approveDevice', 'createInvite', 'retireLegacy'];
 
 function sha256Hex(s) {
   return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(s), Utilities.Charset.UTF_8)
@@ -60,9 +71,11 @@ function props_() {
   return PropertiesService.getScriptProperties();
 }
 
+// A failure to read Properties throws on (a server error, not "unknown
+// device"), so a passing outage doesn't send the screen back to pairing.
 function readDevice_(hash) {
-  try { return JSON.parse(props_().getProperty('dev_' + hash) || 'null'); }
-  catch (_) { return null; }
+  const raw = props_().getProperty('dev_' + hash);
+  try { return JSON.parse(raw || 'null'); } catch (_) { return null; }
 }
 
 function saveDevice_(hash, kind, name, how) {
@@ -102,8 +115,33 @@ function callerFor_(key) {
     const dev = readDevice_(hash);
     if (dev) return { device: dev, hash: hash };
   }
-  if (hash === KEY_HASH && Date.now() < LEGACY_UNTIL) return { legacy: true };
+  if (hash === KEY_HASH && Date.now() < LEGACY_UNTIL && props_().getProperty('LEGACY_OFF') !== '1') {
+    return { legacy: true };
+  }
   return null;
+}
+
+// Ends the old shared code now, once the screen and the phones that held it
+// have their own keys (the device list shows them).
+function retireLegacy() {
+  props_().setProperty('LEGACY_OFF', '1');
+  return { success: true, message: 'הקוד הישן בוטל' };
+}
+
+// A heads-up to the owner whenever a device joins by invite or screen code,
+// so a pairing nobody expected doesn't go unnoticed. Never blocks the pairing.
+function notifyOwner_(dev) {
+  try {
+    const how = dev.how === 'invite' ? 'בקישור גישה' : dev.how === 'screen' ? 'בקוד מסך' : dev.how;
+    MailApp.sendEmail({
+      to: Session.getEffectiveUser().getEmail(),
+      subject: 'מכשיר חדש חובר לקיוסק של 42: ' + dev.name,
+      body: 'מכשיר חדש חובר לניהול המסך במשרד: "' + dev.name + '" (' + how + ').\n\n' +
+            'לא מוכר לך? מנתקים אותו בדף הניהול, ב"מכשירים מחוברים":\n' + SITE_URL
+    });
+  } catch (e) {
+    Logger.log('notifyOwner_: ' + e);
+  }
 }
 
 // "Last seen" for the device list. Re-read under the lock, so a device removed
@@ -129,7 +167,7 @@ function listDevices(caller) {
     if (k.indexOf('dev_') !== 0) return;
     try {
       const d = JSON.parse(all[k]);
-      list.push({ id: d.id, name: d.name, kind: d.kind, since: d.since, seen: d.seen,
+      list.push({ id: d.id, name: d.name, kind: d.kind, since: d.since, seen: d.seen, how: d.how,
                   me: !!caller.hash && k === 'dev_' + caller.hash });
     } catch (_) {}
   });
@@ -156,24 +194,33 @@ function removeDevice(id) {
   }
 }
 
-// A device with no other way in asks for a code. It goes to the script owner
-// (the account the web app runs as), never back to the device that asked.
+// A device with no other way in asks for a code. The code goes to the script
+// owner (the account the web app runs as), never back to the device; the
+// device gets `req` instead, and only the two together connect it. So nobody
+// else can guess the code or burn its tries, and a new request replaces the
+// old one. The limits are kept in Properties and checked under the lock, so a
+// burst of requests can't slip past them.
 function requestPair(p) {
-  const cache = CacheService.getScriptCache();
-  if (cache.get('pairRl')) return { success: false, message: 'קוד נשלח לפני פחות מדקה. בודקים במייל' };
-  const day = 'pairDay_' + Utilities.formatDate(new Date(), 'Asia/Jerusalem', 'yyyyMMdd');
-  const count = parseInt(cache.get(day)) || 0;
-  if (count >= PAIR_PER_DAY) {
-    return { success: false, message: 'נשלחו יותר מדי קודים. אפשר לבקש קישור גישה ממי שכבר מחובר' };
-  }
-  cache.put('pairRl', '1', 60);
-  cache.put(day, String(count + 1), 21600);
-
   const code = randomDigits_(6);
+  const req = Utilities.getUuid().replace(/-/g, '');
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
-    props_().setProperty('PAIR', JSON.stringify({ hash: sha256Hex(code), exp: Date.now() + PAIR_TTL_MS, tries: 0 }));
+    const store = props_();
+    const now = Date.now();
+    let rl = null;
+    try { rl = JSON.parse(store.getProperty('PAIR_RL') || 'null'); } catch (_) {}
+    if (!rl || now - rl.win > PAIR_WINDOW_MS) rl = { win: now, count: 0, last: 0 };
+    if (now - rl.last < PAIR_GAP_MS) return { success: false, message: 'קוד נשלח לפני פחות מדקה. בודקים במייל' };
+    if (rl.count >= PAIR_PER_WINDOW) {
+      return { success: false, message: 'נשלחו יותר מדי קודים. אפשר לבקש קישור גישה ממי שכבר מחובר' };
+    }
+    rl.count++;
+    rl.last = now;
+    store.setProperty('PAIR_RL', JSON.stringify(rl));
+    store.setProperty('PAIR', JSON.stringify({
+      hash: sha256Hex(code), req: sha256Hex(req), exp: now + PAIR_TTL_MS, tries: 0
+    }));
   } finally {
     lock.releaseLock();
   }
@@ -182,19 +229,25 @@ function requestPair(p) {
     subject: 'קוד חיבור לקיוסק של 42: ' + code,
     body: 'מכשיר ביקש להתחבר לניהול המסך במשרד ("' + cleanName_(p.name, 'בלי שם') + '").\n\n' +
           'הקוד: ' + code + '\n' +
-          'בתוקף 10 דקות. מזינים אותו במכשיר שביקש.\n\n' +
+          'בתוקף 10 דקות, ועובד רק במכשיר שביקש אותו.\n\n' +
           'לא ידוע לך מי ביקש? לא למסור את הקוד. הוא יפוג לבד.'
   });
-  return { success: true };
+  return { success: true, req: req };
 }
 
-// Connect a device with an emailed code or an invite. The device made `newKey`
-// itself; only its hash is stored. Under the lock, so an invite works once and
-// a code's tries are counted honestly.
+// Connect a device with an emailed code (plus the `req` its request got) or
+// an invite. The device made `newKey` itself; only its hash is stored. Under
+// the lock, so an invite works once and a code's tries are counted honestly.
 function pair(p) {
   if (String(p.newKey || '').length < MIN_KEY_LEN) {
     return { success: false, message: 'מפתח לא תקין. מרעננים את הדף ומנסים שוב' };
   }
+  const res = pairLocked_(p);
+  if (res.device && res.device.how === 'invite') notifyOwner_(res.device);   // outside the lock
+  return res.device ? { success: true, device: { id: res.device.id, name: res.device.name } } : res;
+}
+
+function pairLocked_(p) {
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
@@ -216,6 +269,10 @@ function pair(p) {
       if (!pr || Date.now() > pr.exp || pr.tries >= PAIR_MAX_TRIES) {
         return { success: false, message: 'הקוד פג. מבקשים קוד חדש' };
       }
+      // Not the device that asked (or it asked again since): not counted as a try.
+      if (!p.req || sha256Hex(String(p.req)) !== pr.req) {
+        return { success: false, message: 'הקוד שייך לבקשה אחרת. מבקשים קוד חדש מהמכשיר הזה' };
+      }
       if (sha256Hex(String(p.code || '').replace(/\D/g, '')) !== pr.hash) {
         pr.tries++;
         store.setProperty('PAIR', JSON.stringify(pr));
@@ -224,8 +281,7 @@ function pair(p) {
       store.deleteProperty('PAIR');
       how = 'mail';
     }
-    const dev = registerDevice_(p.newKey, 'panel', name, how);
-    return { success: true, device: { id: dev.id, name: dev.name } };
+    return { device: registerDevice_(p.newKey, 'panel', name, how) };
   } finally {
     lock.releaseLock();
   }
@@ -247,9 +303,17 @@ function createInvite(p, caller) {
   store.setProperty('inv_' + sha256Hex(token), JSON.stringify({
     exp: Date.now() + INVITE_TTL_MS,
     name: cleanName_(p.name, ''),
-    by: caller.device ? caller.device.id : 'legacy'
+    by: caller.device ? caller.device.id : caller.owner ? 'owner' : 'legacy'
   }));
   return { success: true, invite: token };
+}
+
+// Recovery that nobody else can block: run from the editor (Run ▸ ownerInvite)
+// and open the link from the log on the phone to connect. For when no
+// connected phone is at hand and the emailed code won't come.
+function ownerInvite() {
+  const res = createInvite({ name: 'אורי' }, { owner: true });
+  Logger.log('קישור גישה לפעם אחת, 24 שעות: ' + SITE_URL + '#invite=' + res.invite);
 }
 
 // A screen with no key of its own yet (or one that was disconnected) asks for
@@ -291,6 +355,7 @@ function approveDevice(code) {
   if (!req) return { success: false, message: 'אין מסך שממתין עם הקוד הזה. בודקים את הקוד שמופיע עכשיו על המסך' };
   const dev = saveDevice_(req.hash, 'screen', req.name, 'screen');
   cache.removeAll(['scr:' + code, 'scrBy:' + req.hash, 'kioskPending']);
+  notifyOwner_(dev);
   return { success: true, boot: req.boot, device: { id: dev.id, name: dev.name }, message: 'המסך חובר' };
 }
 
@@ -873,6 +938,9 @@ function doPost(e) {
       return jsonResponse({ success: false, auth: 'denied', message: 'אין גישה מהמכשיר הזה' });
     }
     touchDevice_(caller);
+    if (caller.device && caller.device.kind === 'screen' && PHONE_ONLY.indexOf(action) !== -1) {
+      return jsonResponse({ success: false, message: 'ניהול מכשירים אפשר רק מנייד מחובר, לא מהמסך' });
+    }
     const res = route_(action, p, caller);
     // Still on the old shared code: the client swaps it for a key of its own.
     if (caller.legacy) res.legacy = true;
@@ -930,6 +998,8 @@ function route_(action, p, caller) {
       return createInvite(p, caller);
     case 'upgradeDevice':
       return upgradeDevice(p, caller);
+    case 'retireLegacy':
+      return caller.device ? retireLegacy() : { success: false, message: 'רק ממכשיר עם מפתח משלו' };
 
     default:
       return { success: false, message: 'Unknown action: ' + action };
