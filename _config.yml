@@ -5,3 +5,4 @@ exclude:
   - appscript.gs
   - appsscript.json
   - source-art
+  - dev

@@ -14,7 +14,7 @@
      the scripts, and a new page with old scripts would half-work. Bump it
      whenever config.js or utils.js change. -->
 <script src="config.js?v=2"></script>
-<script src="utils.js?v=2"></script>
+<script src="utils.js?v=3"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body {
@@ -69,6 +69,12 @@
     margin-top: 4vmin;
   }
   #fbHint { font-size: 2.4vmin; font-weight: 600; color: #E5187F; margin-top: 2vmin; }
+  /* The pairing code, big enough to read off the wall from across the room. */
+  #fbHint .pairCode {
+    display: block; margin: 1.2vmin 0;
+    font-size: 8vmin; font-weight: 800; letter-spacing: 0.06em;
+    color: #2E0B33; direction: ltr; font-variant-numeric: tabular-nums;
+  }
 
   /* ── Content stage ──
      Hidden until the content actually starts playing/loading is done, so a
@@ -346,6 +352,7 @@ const LONG_PRESS_MS     = 700;    // press-and-hold that hands the screen over
 const TOUCH_IDLE_MS     = 3 * 60 * 1000;  // never leave a public screen unlocked
 const YT_API_TIMEOUT_MS = 10000;  // give up on the YouTube API script after this
 const SHOW_NOW_TTL_MS   = 10 * 60 * 1000; // older "show now" requests are ignored
+const NOT_HTTPS         = 'הכתובת לא מתחילה ב-https://';   // see httpsUrl()
 
 // player.html?preview=1 is the panel's live preview of a text board: it draws
 // whatever item the panel posts to it and does nothing else — no polling, no
@@ -396,12 +403,11 @@ const S = {
   filesAutoClose: null,
   preload: null,        // { id, el|img, blobUrl } — next item, warmed in advance
   quickPoll: false,     // check in again soon (so the panel sees a change fast)
-  bootId: String(Date.now()) + '-' + Math.random().toString(36).slice(2, 7)
+  awaitingPair: false,  // not connected: showing a code, checking back often
+  // New on every page load. The leading tag names this player build, so the
+  // heartbeat (getStatus) shows which code the screen is actually running.
+  bootId: 'v3-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7)
 };
-
-// The short code shown on the waiting board while the screen waits to be
-// paired — the panel shows the same one, so the two can be matched up.
-function pairCode() { return S.bootId.slice(-5); }
 
 const CACHE_KEY = 'kioskCache';
 // Names of the on-device file store. Declared up here, not next to the file
@@ -426,7 +432,7 @@ function markPlayerHere() {
 // ════════════════════════════════════════════════════════════
 (function boot() {
   if (PREVIEW) { startPreview(); return; }
-  adoptKeyFromHash();   // player.html#key=… pairs this device directly
+  adoptKeyFromHash();   // an old access link (…#key=): traded for a device key
   markPlayerHere();
   startClocks();
   requestWakeLock();
@@ -499,6 +505,8 @@ async function poll() {
   // Re-read on every poll: the admin panel, opened on this device, may have
   // added a file since the last round.
   await refreshLocalNames();
+  // A screen's first run: a key of its own, to be approved from the panel.
+  if (!getAccessKey()) setAccessKey(newDeviceKey());
   try {
     const res = await apiCall('getPlaylist', {
       current: S.currentTitle || 'מסך המתנה',
@@ -509,19 +517,26 @@ async function poll() {
       fail: failNote(),
       boot: S.bootId
     });
-    // Just approved in the panel: keep the code for every call from now on.
+    // The server from before device keys hands the shared code over this way.
     if (res.screenKey) setAccessKey(res.screenKey);
+    S.awaitingPair = false;
     // A non-JSON reply (Google error page during a redeploy) must never be
     // mistaken for an empty playlist — that would blank a working screen.
     if (res.success && Array.isArray(res.items)) {
       S.failStreak = 0;
-      setPairHint(false);
+      setPairHint(null);
       applyData(res, false);
+      // Still on the old shared code: trade it for a key of this screen's own.
+      if (res.legacy) upgradeLegacyKey('screen', 'מסך');
     } else if (res.auth) {
-      // No (valid) code on this device. The screen keeps playing the last
-      // playlist it knew and asks to be approved from the panel.
+      // Not connected. The screen keeps playing the last playlist it knew and
+      // shows a code to type into the panel, checking back often so it starts
+      // soon after. A key the server won't even consider (the old shared code,
+      // once retired) is replaced, so the next check gets a code.
       S.failStreak = 0;
-      setPairHint(true);
+      S.awaitingPair = true;
+      if (res.auth === 'denied') { setAccessKey(newDeviceKey()); S.quickPoll = true; }
+      setPairHint(res);
     } else {
       S.failStreak++;
     }
@@ -532,7 +547,7 @@ async function poll() {
 
   markPlayerHere();
   const sec = (S.settings && S.settings.refreshSeconds) || 60;
-  const wait = S.quickPoll ? 3 : Math.max(15, sec);
+  const wait = S.quickPoll ? 3 : S.awaitingPair ? 15 : Math.max(15, sec);
   S.quickPoll = false;
   clearTimeout(S.pollTimer);
   S.pollTimer = setTimeout(poll, wait * 1000);
@@ -624,10 +639,23 @@ function handleShowNow(settings, allItems) {
   S.quickPoll = true;      // report the new item right away, for the panel
 }
 
-function setPairHint(on) {
-  $('fbHint').textContent = on
-    ? 'המסך ממתין לחיבור · קוד ' + pairCode() + ' · מאשרים בממשק הניהול'
-    : '';
+// The waiting board's line while the screen isn't connected: its 6-digit code,
+// big, to be typed into the panel ("מכשירים מחוברים" ▸ "חיבור מסך").
+function setPairHint(res) {
+  const el = $('fbHint');
+  el.textContent = '';
+  if (!res) return;
+  const code = String(res.code || '');
+  if (/^\d{6}$/.test(code)) {
+    el.append('המסך ממתין לחיבור · הקוד:');
+    const big = document.createElement('span');
+    big.className = 'pairCode';
+    big.textContent = code.slice(0, 3) + ' ' + code.slice(3);
+    el.append(big, 'מקלידים אותו בממשק הניהול, ב"מכשירים מחוברים"');
+  } else {
+    const msg = res.message || 'מנסה שוב בעוד רגע';
+    el.textContent = /^המסך/.test(msg) ? msg : 'המסך ממתין לחיבור · ' + msg;
+  }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1059,7 +1087,12 @@ function renderNotice(stage, item) { renderTextItem(stage, item, 'notice'); }
 // failure, here with the admin's own text in the strip above the robot.
 function renderError(stage, item)  { renderTextItem(stage, item, 'err'); }
 
+// Only https addresses go on the screen. The server refuses anything else when
+// an item is saved; this covers a row typed straight into the sheet.
+function httpsUrl(item) { return /^https:\/\/[^\s]/i.test(String(item.url || '')); }
+
 function renderWebsite(stage, item) {
+  if (!httpsUrl(item)) { failSkip(0, NOT_HTTPS); return; }
   const f = document.createElement('iframe');
   f.setAttribute('allow', 'autoplay; fullscreen; encrypted-media');
   f.setAttribute('allowfullscreen', '');
@@ -1071,6 +1104,7 @@ function renderWebsite(stage, item) {
 }
 
 function renderImage(stage, item) {
+  if (!httpsUrl(item)) { failSkip(0, NOT_HTTPS); return; }
   const img = document.createElement('img');
   img.alt = item.title;
   img.style.objectFit = fitFor(item);
@@ -1137,6 +1171,7 @@ function preloadItem(item) {
   if (!item || (S.preload && S.preload.id === item.id)) return;
   dropPreload();
 
+  if ((item.type === 'image' || item.type === 'video') && !httpsUrl(item)) return;
   if (item.type === 'image') {
     const img = new Image();
     img.src = item.url;
@@ -1172,6 +1207,7 @@ function takePreloaded(item) {
 }
 
 function renderVideo(stage, item) {
+  if (!httpsUrl(item)) { failSkip(0, NOT_HTTPS); return; }
   const warm = takePreloaded(item);
   if (warm) {
     stage.appendChild(warm.el);

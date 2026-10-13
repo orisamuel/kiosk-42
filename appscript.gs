@@ -19,50 +19,294 @@ const SHEET_ID = '1sBuKpJyIpA_yZzQB0zIo9zQaM1Yb-ZZpE638tQRk3d4';
 
 // ============================================================
 // ACCESS
-// The script URL sits in config.js on a public site, so every action except
-// `ping` needs the access code. Only its SHA-256 lives here — the code itself
-// is in the project's .env and on each paired device (localStorage
-// 'kioskKey'). To rotate it: put a new code in .env, its hash below, redeploy,
-// then open the panel with the new access link and re-pair the screen.
+// The script URL sits in config.js on a public site, so nothing here answers
+// without a device key, except `ping` and the steps that connect a device.
+//
+// A device key is a random string the device made for itself. Only its
+// SHA-256 is kept, in Script Properties (`dev_<hash>`), so nothing in this
+// public file opens the screen, and each device can be disconnected on its
+// own from the panel. A device connects once, by one of:
+//   • an invite link made in a connected panel (one use, 24 hours);
+//   • a 6-digit code emailed to the script owner (10 minutes, 5 tries);
+//   • the screen: the code on its waiting board, typed into a connected panel.
+// Requests are POST with a form body, so a key never sits in a URL.
+//
+// Run setupMail() once from the editor after the first deploy of this: Google
+// asks for the permission to send the emailed codes.
 // ============================================================
 
+// The single shared code used before device keys. Until LEGACY_UNTIL it still
+// works, so a device holding it can trade it for a key of its own (the panel
+// and the screen do that by themselves on their next call). After that it
+// opens nothing, and KEY_HASH and KIOSK_KEY in .env can be deleted.
 const KEY_HASH = '79484da10a11feccd1c377da9bd0c25350454ea0b96185054f8184573ab7e52a';
+const LEGACY_UNTIL = new Date('2026-10-21T00:00:00+03:00').getTime();
+
+const MIN_KEY_LEN    = 32;
+const PAIR_TTL_MS    = 10 * 60 * 1000;      // emailed code
+const PAIR_MAX_TRIES = 5;
+const PAIR_PER_DAY   = 6;                   // emails, per 6-hour cache window
+const INVITE_TTL_MS  = 24 * 60 * 60 * 1000;
+const SCREEN_REQ_TTL = 600;                 // seconds a waiting screen's code lives
+const SCREEN_REQ_MAX = 20;                  // new screen requests per 10 minutes
+const SEEN_EVERY_MS  = 60 * 60 * 1000;      // "last seen" is written at most hourly
 
 function sha256Hex(s) {
   return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(s), Utilities.Charset.UTF_8)
     .map(b => ('0' + (b & 0xff).toString(16)).slice(-2)).join('');
 }
 
-function keyOk(k) {
-  return !!k && sha256Hex(k) === KEY_HASH;
+function props_() {
+  return PropertiesService.getScriptProperties();
 }
 
-// A screen with no code yet asks for its playlist anyway. That request is
-// parked as "pending" for the panel to approve; once approved, the next
-// request from the same page load is answered normally and carries the code,
-// which the screen keeps from then on.
-function pairScreen(p) {
-  const boot = String(p.boot || '').slice(0, 40);
-  if (!boot) return { success: false, auth: 'denied', message: 'אין גישה' };
-  const cache = CacheService.getScriptCache();
-  const handed = cache.get('kioskPair:' + boot);
-  if (handed && keyOk(handed)) {
-    cache.remove('kioskPair:' + boot);
-    cache.remove('kioskPending');
-    const res = getPlaylist(p.current, p.files, p.boot, p.fail);
-    res.screenKey = handed;
-    return res;
+function readDevice_(hash) {
+  try { return JSON.parse(props_().getProperty('dev_' + hash) || 'null'); }
+  catch (_) { return null; }
+}
+
+function saveDevice_(hash, kind, name, how) {
+  const now = Date.now();
+  const dev = {
+    id: hash.slice(0, 10),
+    kind: kind === 'screen' ? 'screen' : 'panel',
+    name: cleanName_(name, kind === 'screen' ? 'מסך' : 'מכשיר'),
+    since: now, seen: now, how: how
+  };
+  props_().setProperty('dev_' + hash, JSON.stringify(dev));
+  return dev;
+}
+
+function registerDevice_(key, kind, name, how) {
+  key = String(key || '');
+  return key.length < MIN_KEY_LEN ? null : saveDevice_(sha256Hex(key), kind, name, how);
+}
+
+function cleanName_(s, fallback) {
+  const n = String(s || '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 40);
+  return n || fallback;
+}
+
+// A short numeric code. getUuid() is random (v4); its first 48 bits are plenty.
+function randomDigits_(n) {
+  const x = parseInt(Utilities.getUuid().replace(/-/g, '').slice(0, 12), 16);
+  return String(x % Math.pow(10, n)).padStart(n, '0');
+}
+
+// Who is calling: a connected device, the old shared code, or nobody (null).
+function callerFor_(key) {
+  key = String(key || '');
+  if (!key) return null;
+  const hash = sha256Hex(key);
+  if (key.length >= MIN_KEY_LEN) {
+    const dev = readDevice_(hash);
+    if (dev) return { device: dev, hash: hash };
   }
-  cache.put('kioskPending', JSON.stringify({ boot: boot, ts: Date.now() }), 600);
-  return { success: false, auth: 'pair', message: 'המסך ממתין לחיבור בממשק הניהול' };
+  if (hash === KEY_HASH && Date.now() < LEGACY_UNTIL) return { legacy: true };
+  return null;
 }
 
-// Called from the panel (which holds the code) for the screen it saw pending.
-function approveScreen(boot, key) {
-  boot = String(boot || '').slice(0, 40);
-  if (!boot) return { success: false, message: 'חסר מזהה מסך' };
-  CacheService.getScriptCache().put('kioskPair:' + boot, String(key), 600);
-  return { success: true, message: 'המסך יתחבר בבדיקה הבאה שלו' };
+// "Last seen" for the device list. Re-read under the lock, so a device removed
+// a moment ago isn't written back by its own request in flight.
+function touchDevice_(caller) {
+  if (!caller.device || Date.now() - (caller.device.seen || 0) < SEEN_EVERY_MS) return;
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(2000)) return;
+  try {
+    const dev = readDevice_(caller.hash);
+    if (!dev) return;
+    dev.seen = Date.now();
+    props_().setProperty('dev_' + caller.hash, JSON.stringify(dev));
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function listDevices(caller) {
+  const all = props_().getProperties();
+  const list = [];
+  Object.keys(all).forEach(k => {
+    if (k.indexOf('dev_') !== 0) return;
+    try {
+      const d = JSON.parse(all[k]);
+      list.push({ id: d.id, name: d.name, kind: d.kind, since: d.since, seen: d.seen,
+                  me: !!caller.hash && k === 'dev_' + caller.hash });
+    } catch (_) {}
+  });
+  list.sort((a, b) => (a.since || 0) - (b.since || 0));
+  return { success: true, devices: list };
+}
+
+function removeDevice(id) {
+  id = String(id || '');
+  if (!id) return { success: false, message: 'חסר מזהה מכשיר' };
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const store = props_();
+    const all = store.getProperties();
+    const k = Object.keys(all).filter(k => k.indexOf('dev_') === 0).find(k => {
+      try { return JSON.parse(all[k]).id === id; } catch (_) { return false; }
+    });
+    if (!k) return { success: false, message: 'המכשיר לא נמצא' };
+    store.deleteProperty(k);
+    return { success: true, message: 'המכשיר נותק' };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// A device with no other way in asks for a code. It goes to the script owner
+// (the account the web app runs as), never back to the device that asked.
+function requestPair(p) {
+  const cache = CacheService.getScriptCache();
+  if (cache.get('pairRl')) return { success: false, message: 'קוד נשלח לפני פחות מדקה. בודקים במייל' };
+  const day = 'pairDay_' + Utilities.formatDate(new Date(), 'Asia/Jerusalem', 'yyyyMMdd');
+  const count = parseInt(cache.get(day)) || 0;
+  if (count >= PAIR_PER_DAY) {
+    return { success: false, message: 'נשלחו יותר מדי קודים. אפשר לבקש קישור גישה ממי שכבר מחובר' };
+  }
+  cache.put('pairRl', '1', 60);
+  cache.put(day, String(count + 1), 21600);
+
+  const code = randomDigits_(6);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    props_().setProperty('PAIR', JSON.stringify({ hash: sha256Hex(code), exp: Date.now() + PAIR_TTL_MS, tries: 0 }));
+  } finally {
+    lock.releaseLock();
+  }
+  MailApp.sendEmail({
+    to: Session.getEffectiveUser().getEmail(),
+    subject: 'קוד חיבור לקיוסק של 42: ' + code,
+    body: 'מכשיר ביקש להתחבר לניהול המסך במשרד ("' + cleanName_(p.name, 'בלי שם') + '").\n\n' +
+          'הקוד: ' + code + '\n' +
+          'בתוקף 10 דקות. מזינים אותו במכשיר שביקש.\n\n' +
+          'לא ידוע לך מי ביקש? לא למסור את הקוד. הוא יפוג לבד.'
+  });
+  return { success: true };
+}
+
+// Connect a device with an emailed code or an invite. The device made `newKey`
+// itself; only its hash is stored. Under the lock, so an invite works once and
+// a code's tries are counted honestly.
+function pair(p) {
+  if (String(p.newKey || '').length < MIN_KEY_LEN) {
+    return { success: false, message: 'מפתח לא תקין. מרעננים את הדף ומנסים שוב' };
+  }
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const store = props_();
+    let name = p.name, how;
+    if (p.invite) {
+      const k = 'inv_' + sha256Hex(String(p.invite));
+      let inv = null;
+      try { inv = JSON.parse(store.getProperty(k) || 'null'); } catch (_) {}
+      if (inv) store.deleteProperty(k);
+      if (!inv || Date.now() > inv.exp) {
+        return { success: false, message: 'הקישור כבר נוצל או שפג תוקפו. מבקשים קישור חדש' };
+      }
+      if (inv.name) name = inv.name;
+      how = 'invite';
+    } else {
+      let pr = null;
+      try { pr = JSON.parse(store.getProperty('PAIR') || 'null'); } catch (_) {}
+      if (!pr || Date.now() > pr.exp || pr.tries >= PAIR_MAX_TRIES) {
+        return { success: false, message: 'הקוד פג. מבקשים קוד חדש' };
+      }
+      if (sha256Hex(String(p.code || '').replace(/\D/g, '')) !== pr.hash) {
+        pr.tries++;
+        store.setProperty('PAIR', JSON.stringify(pr));
+        return { success: false, message: pr.tries >= PAIR_MAX_TRIES ? 'יותר מדי ניסיונות. מבקשים קוד חדש' : 'הקוד לא נכון' };
+      }
+      store.deleteProperty('PAIR');
+      how = 'mail';
+    }
+    const dev = registerDevice_(p.newKey, 'panel', name, how);
+    return { success: true, device: { id: dev.id, name: dev.name } };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// A one-time link for another phone. `name` (optional) is what the new device
+// will be called in the list.
+function createInvite(p, caller) {
+  const token = Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '');
+  const store = props_();
+  // Expired links are dropped on the way, so unused ones don't pile up.
+  const all = store.getProperties();
+  Object.keys(all).forEach(k => {
+    if (k.indexOf('inv_') !== 0) return;
+    let exp = 0;
+    try { exp = JSON.parse(all[k]).exp; } catch (_) {}
+    if (!(exp > Date.now())) store.deleteProperty(k);
+  });
+  store.setProperty('inv_' + sha256Hex(token), JSON.stringify({
+    exp: Date.now() + INVITE_TTL_MS,
+    name: cleanName_(p.name, ''),
+    by: caller.device ? caller.device.id : 'legacy'
+  }));
+  return { success: true, invite: token };
+}
+
+// A screen with no key of its own yet (or one that was disconnected) asks for
+// its playlist anyway. It gets a 6-digit code to show on its waiting board and
+// is let in once someone types that code into a connected panel. The code is
+// only ever shown on the screen that asked, so approving it proves the person
+// is looking at that screen: a request from anywhere else carries a code
+// nobody in the office can see.
+function screenRequest(p) {
+  const key = String(p.key || '');
+  if (key.length < MIN_KEY_LEN) return { success: false, auth: 'denied', message: 'אין גישה' };
+  const hash = sha256Hex(key);
+  const cache = CacheService.getScriptCache();
+  let code = cache.get('scrBy:' + hash);
+  let req = code ? cache.get('scr:' + code) : null;
+  if (!req) {
+    const n = parseInt(cache.get('scrCount')) || 0;
+    if (n >= SCREEN_REQ_MAX) return { success: false, auth: 'pair', message: 'יש כרגע יותר מדי בקשות חיבור' };
+    cache.put('scrCount', String(n + 1), 600);
+    do { code = randomDigits_(6); } while (cache.get('scr:' + code));
+    req = JSON.stringify({ hash: hash, boot: String(p.boot || '').slice(0, 60),
+                           name: cleanName_(p.name, 'מסך'), ts: Date.now() });
+  }
+  // Each poll keeps the code (and the panel's hint) alive while the screen waits.
+  cache.put('scr:' + code, req, SCREEN_REQ_TTL);
+  cache.put('scrBy:' + hash, code, SCREEN_REQ_TTL);
+  const r = JSON.parse(req);
+  cache.put('kioskPending', JSON.stringify({ ts: Date.now(), boot: r.boot, name: r.name }), SCREEN_REQ_TTL);
+  return { success: false, auth: 'pair', code: code, message: 'המסך ממתין לחיבור בממשק הניהול' };
+}
+
+// Typed into a connected panel: the code the waiting screen shows.
+function approveDevice(code) {
+  code = String(code || '').replace(/\D/g, '');
+  if (code.length !== 6) return { success: false, message: 'הקוד שעל המסך הוא 6 ספרות' };
+  const cache = CacheService.getScriptCache();
+  let req = null;
+  try { req = JSON.parse(cache.get('scr:' + code) || 'null'); } catch (_) {}
+  if (!req) return { success: false, message: 'אין מסך שממתין עם הקוד הזה. בודקים את הקוד שמופיע עכשיו על המסך' };
+  const dev = saveDevice_(req.hash, 'screen', req.name, 'screen');
+  cache.removeAll(['scr:' + code, 'scrBy:' + req.hash, 'kioskPending']);
+  return { success: true, boot: req.boot, device: { id: dev.id, name: dev.name }, message: 'המסך חובר' };
+}
+
+// A device that still holds the old shared code trades it for a key of its own.
+function upgradeDevice(p, caller) {
+  if (!caller.legacy) return { success: true, message: 'המכשיר כבר מחובר' };
+  const dev = registerDevice_(p.newKey, p.kind, p.name, 'upgrade');
+  if (!dev) return { success: false, message: 'מפתח לא תקין' };
+  return { success: true, device: { id: dev.id, name: dev.name } };
+}
+
+// Run once from the editor (Run ▸ setupMail) so Google asks for the permission
+// to send the emailed codes. Sends nothing.
+function setupMail() {
+  Logger.log('Codes go to ' + Session.getEffectiveUser().getEmail() +
+             ' · mail quota left today: ' + MailApp.getRemainingDailyQuota());
 }
 
 // ============================================================
@@ -149,9 +393,55 @@ function findRow(sheet, colIndex, value) {
 const PLAYLIST_HEADERS = ['id', 'title', 'type', 'url', 'duration', 'active', 'order',
                           'created', 'loop', 'fit', 'loops', 'text', 'heading'];
 
+const ITEM_TYPES = ['youtube', 'video', 'drive', 'local', 'website', 'image', 'slide', 'notice', 'error'];
+const MAX_URL = 2000, MAX_TITLE = 200, MAX_TEXT = 2000, MAX_HEADING = 300;
+
+// The player only lifts the video / file id out of these, but an address on
+// another host under these types is a mistake worth catching at the door.
+const YT_HOSTS = ['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com',
+                  'youtu.be', 'youtube-nocookie.com', 'www.youtube-nocookie.com'];
+const DRIVE_HOSTS = ['drive.google.com', 'docs.google.com', 'drive.usercontent.google.com'];
+
 // Types the player draws itself from text, with no address to fetch.
 function isTextType(t) {
   return t === 'slide' || t === 'notice' || t === 'error';
+}
+
+// The host of an https:// address, or null. Plain http never played anyway:
+// the player is an https page, and browsers block http content inside it.
+function httpsHost_(url) {
+  const m = /^https:\/\/([^\/?#\s]+)(?:[\/?#]|$)/i.exec(String(url || ''));
+  if (!m || /[@\\]/.test(m[1])) return null;   // no user:password@ part
+  const host = m[1].replace(/:\d+$/, '').toLowerCase();
+  return host.indexOf('.') > 0 && !/[:\s]/.test(host) ? host : null;
+}
+
+// Why an item can't be saved, or '' when it can. Checked on every add and on
+// every edit that touches the type or the address.
+function itemProblem_(type, url) {
+  if (ITEM_TYPES.indexOf(type) === -1) return 'סוג פריט לא מוכר';
+  if (isTextType(type)) return '';
+  url = String(url || '').trim();
+  if (!url) return 'חסרה כתובת';
+  if (url.length > MAX_URL) return 'הכתובת ארוכה מדי';
+  if (type === 'local') {
+    return url.length > 255 || /[\u0000-\u001f\u007f]/.test(url) ? 'שם הקובץ לא תקין' : '';
+  }
+  if (type === 'youtube' && /^[\w-]{11}$/.test(url)) return '';   // a bare video id
+  if (type === 'drive' && /^[\w-]{20,}$/.test(url)) return '';    // a bare file id
+  const host = httpsHost_(url);
+  if (!host) return 'הכתובת צריכה להתחיל ב-https://';
+  if (type === 'youtube' && YT_HOSTS.indexOf(host) === -1) return 'זו לא כתובת של יוטיוב';
+  if (type === 'drive' && DRIVE_HOSTS.indexOf(host) === -1) return 'זו לא כתובת של גוגל דרייב';
+  return '';
+}
+
+// Text for a cell. One that starts with = + - @ would be read by Sheets as a
+// formula, so it gets the apostrophe that keeps it plain text (and that is not
+// part of the value read back).
+function cell_(s, max) {
+  s = String(s === undefined || s === null ? '' : s).slice(0, max);
+  return /^[=+\-@]/.test(s) ? "'" + s : s;
 }
 
 // Play count: 0 = forever, N = N times. Blank falls back to the legacy
@@ -213,13 +503,13 @@ function getPlaylist(currentTitle, localFiles, bootId, failNote) {
     if (currentTitle) {
       CacheService.getScriptCache().put('kioskHeartbeat', JSON.stringify({
         ts: Date.now(),
-        item: String(currentTitle),
+        item: String(currentTitle).slice(0, MAX_TITLE),
         // Changes on every page load, so the panel can confirm a refresh landed.
-        boot: bootId ? String(bootId) : '',
+        boot: bootId ? String(bootId).slice(0, 60) : '',
         // Files stored on the screen itself, so the admin panel can offer them.
-        files: localFiles ? String(localFiles).split('|').filter(String) : [],
+        files: localFiles ? String(localFiles).slice(0, 8000).split('|').filter(String) : [],
         // 'item title|why it would not play' — the panel shows this verbatim.
-        fail: failNote ? String(failNote) : ''
+        fail: failNote ? String(failNote).slice(0, 500) : ''
       }), 21600);
     }
 
@@ -242,6 +532,9 @@ function addItem(d) {
   try {
     if (!d.title) return { success: false, message: 'חסר שם' };
     if (!d.url && !d.text && !d.heading) return { success: false, message: 'חסר כתובת או טקסט' };
+    const type = d.type || 'website';
+    const problem = itemProblem_(type, d.url);
+    if (problem) return { success: false, message: problem };
     const sheet = ensureSheet('playlist', PLAYLIST_HEADERS);
     const data = sheet.getDataRange().getValues();
     let maxOrder = 0;
@@ -251,9 +544,9 @@ function addItem(d) {
     const id = Utilities.getUuid().substring(0, 8);
     sheet.appendRow([
       id,
-      d.title,
-      d.type || 'website',
-      d.url,
+      cell_(d.title, MAX_TITLE),
+      type,
+      cell_(String(d.url || '').trim(), MAX_URL),
       parseInt(d.duration) || 0,
       'כן',
       maxOrder + 1,
@@ -261,8 +554,8 @@ function addItem(d) {
       parseLoopsParam(d.loops) === 0 ? 'כן' : 'לא',
       d.fit === 'contain' || d.fit === 'cover' ? d.fit : '',
       parseLoopsParam(d.loops),
-      d.text || '',
-      d.heading || ''
+      cell_(d.text, MAX_TEXT),
+      cell_(d.heading, MAX_HEADING)
     ]);
     return { success: true, message: 'נוסף לפלייליסט', id: id };
   } catch (e) {
@@ -276,14 +569,20 @@ function updateItem(d) {
     if (!sheet) return { success: false, message: 'גיליון playlist לא נמצא' };
     const row = findRow(sheet, 0, d.id);
     if (row === -1) return { success: false, message: 'פריט לא נמצא' };
-    if (d.title !== undefined)    sheet.getRange(row, 2).setValue(d.title);
-    if (d.type !== undefined)     sheet.getRange(row, 3).setValue(d.type);
-    if (d.url !== undefined)      sheet.getRange(row, 4).setValue(d.url);
+    if (d.type !== undefined || d.url !== undefined) {
+      const cur = sheet.getRange(row, 3, 1, 2).getValues()[0];   // type, url as stored
+      const problem = itemProblem_(d.type !== undefined ? String(d.type) : String(cur[0] || 'website'),
+                                   d.url !== undefined ? d.url : cur[1]);
+      if (problem) return { success: false, message: problem };
+    }
+    if (d.title !== undefined)    sheet.getRange(row, 2).setValue(cell_(d.title, MAX_TITLE));
+    if (d.type !== undefined)     sheet.getRange(row, 3).setValue(String(d.type));
+    if (d.url !== undefined)      sheet.getRange(row, 4).setValue(cell_(String(d.url).trim(), MAX_URL));
     if (d.duration !== undefined) sheet.getRange(row, 5).setValue(parseInt(d.duration) || 0);
     if (d.active !== undefined)   sheet.getRange(row, 6).setValue(d.active === 'true' || d.active === true ? 'כן' : 'לא');
     if (d.fit !== undefined)      sheet.getRange(row, 10).setValue(d.fit === 'contain' || d.fit === 'cover' ? d.fit : '');
-    if (d.text !== undefined)     sheet.getRange(row, 12).setValue(d.text);
-    if (d.heading !== undefined)  sheet.getRange(row, 13).setValue(d.heading);
+    if (d.text !== undefined)     sheet.getRange(row, 12).setValue(cell_(d.text, MAX_TEXT));
+    if (d.heading !== undefined)  sheet.getRange(row, 13).setValue(cell_(d.heading, MAX_HEADING));
     if (d.loops !== undefined) {
       const n = parseLoopsParam(d.loops);
       sheet.getRange(row, 11).setValue(n);
@@ -427,12 +726,16 @@ function updateSettings(p) {
     const sheet = ensureSheet('settings', ['key', 'value']);
     getSettingsMap(); // make sure default rows exist
     const boolKeys = ['muted', 'showClock'];
+    const numKeys = ['refreshSeconds', 'defaultDuration', 'dailyReloadHour', 'gapSeconds'];
     const allowed = ['kioskName', 'refreshSeconds', 'defaultDuration', 'muted', 'showClock',
                      'dailyReloadHour', 'videoFit', 'idleMessage', 'gapSeconds'];
     allowed.forEach(k => {
       if (p[k] === undefined) return;
       let v = p[k];
       if (boolKeys.indexOf(k) !== -1) v = (v === 'true' || v === true || v === 'כן') ? 'כן' : 'לא';
+      else if (numKeys.indexOf(k) !== -1) { v = parseInt(v); if (isNaN(v)) return; }
+      else if (k === 'videoFit') v = v === 'contain' ? 'contain' : 'cover';
+      else v = cell_(v, 300);
       setSettingRow(sheet, k, v);
     });
     return { success: true, message: 'ההגדרות נשמרו' };
@@ -473,7 +776,8 @@ function showNow(id) {
 function getStatus() {
   try {
     const cache = CacheService.getScriptCache();
-    // A screen without the access code, waiting to be approved in the panel.
+    // A screen with no key yet, waiting for its code to be typed into a panel.
+    // The code itself is never in here: it has to be read off the screen.
     let pending = null;
     try { pending = JSON.parse(cache.get('kioskPending') || 'null'); } catch (_) {}
     const raw = cache.get('kioskHeartbeat');
@@ -493,13 +797,13 @@ function getStatus() {
 
 function checkEmbed(url) {
   try {
-    if (!url || !/^https?:\/\//i.test(url)) {
+    url = String(url || '').trim();
+    if (!httpsHost_(url)) {
       return { success: true, embeddable: 'unknown', reason: 'כתובת לא תקינה' };
     }
     const resp = UrlFetchApp.fetch(url, {
       muteHttpExceptions: true,
-      followRedirects: true,
-      validateHttpsCertificates: false
+      followRedirects: true
     });
     const headers = resp.getAllHeaders();
     let xfo = '', csp = '';
@@ -537,62 +841,97 @@ function keepWarm() {
 // HTTP ROUTER — single endpoint, switches on `action` parameter
 // ============================================================
 
-function doGet(e)  { return doPost(e); }
+// GET answers `ping` only. Anything else would carry a key in its URL.
+function doGet(e) {
+  if (e && e.parameter && e.parameter.action === 'ping') return jsonResponse({ success: true, version: 'v3' });
+  return jsonResponse({ success: false, message: 'POST only' });
+}
+
+// POST with a form body (application/x-www-form-urlencoded): Apps Script reads
+// it into e.parameter, and it needs no CORS preflight.
 function doPost(e) {
   try {
     if (!e || !e.parameter) return jsonResponse({ success: false, message: 'No parameters' });
-    const action = e.parameter.action;
     const p = e.parameter;
-
-    if (action === 'ping') return jsonResponse({ success: true, version: 'v2' });
-    if (!keyOk(p.key)) {
-      // A screen asking for its playlist without the code is offered pairing.
-      if (action === 'getPlaylist') return jsonResponse(pairScreen(p));
-      return jsonResponse({ success: false, auth: 'denied', message: 'אין גישה: חסר קוד גישה או שהוא שגוי' });
+    const action = p.action;
+    // The key belongs in the body. One in the address is refused, not used.
+    if (/(^|&)key=/.test(e.queryString || '')) {
+      return jsonResponse({ success: false, auth: 'denied', message: 'אין גישה: מרעננים את הדף' });
     }
 
+    // The only actions open to a device that isn't connected.
     switch (action) {
-
-      // ── Playlist ──────────────────────────────────────────
-      case 'getPlaylist':
-        return jsonResponse(getPlaylist(p.current, p.files, p.boot, p.fail));
-      case 'addItem':
-        return jsonResponse(addItem({
-          title: p.title, type: p.type, url: p.url, duration: p.duration,
-          loops: p.loops, fit: p.fit, text: p.text, heading: p.heading
-        }));
-      case 'updateItem':
-        return jsonResponse(updateItem({
-          id: p.id, title: p.title, type: p.type, url: p.url,
-          duration: p.duration, active: p.active, loops: p.loops, fit: p.fit,
-          text: p.text, heading: p.heading
-        }));
-      case 'deleteItem':
-        return jsonResponse(deleteItem(p.id));
-      case 'moveItem':
-        return jsonResponse(moveItem(p.id, p.dir));
-      case 'reorderItems':
-        return jsonResponse(reorderItems(p.ids));
-
-      // ── Settings & kiosk control ─────────────────────────
-      case 'updateSettings':
-        return jsonResponse(updateSettings(p));
-      case 'refreshKiosk':
-        return jsonResponse(refreshKiosk());
-      case 'showNow':
-        return jsonResponse(showNow(p.id));
-      case 'getStatus':
-        return jsonResponse(getStatus());
-      case 'approveScreen':
-        return jsonResponse(approveScreen(p.boot, p.key));
-      case 'checkEmbed':
-        return jsonResponse(checkEmbed(p.url));
-
-      default:
-        return jsonResponse({ success: false, message: 'Unknown action: ' + action });
+      case 'ping':        return jsonResponse({ success: true, version: 'v3' });
+      case 'requestPair': return jsonResponse(requestPair(p));
+      case 'pair':        return jsonResponse(pair(p));
     }
+
+    const caller = callerFor_(p.key);
+    if (!caller) {
+      // The screen asking for its playlist is offered a code to be approved.
+      if (action === 'getPlaylist' && p.boot) return jsonResponse(screenRequest(p));
+      return jsonResponse({ success: false, auth: 'denied', message: 'אין גישה מהמכשיר הזה' });
+    }
+    touchDevice_(caller);
+    const res = route_(action, p, caller);
+    // Still on the old shared code: the client swaps it for a key of its own.
+    if (caller.legacy) res.legacy = true;
+    return jsonResponse(res);
   } catch (e) {
     Logger.log('doPost error: ' + e);
     return jsonResponse({ success: false, message: e.toString() });
+  }
+}
+
+function route_(action, p, caller) {
+  switch (action) {
+
+    // ── Playlist ──────────────────────────────────────────
+    case 'getPlaylist':
+      return getPlaylist(p.current, p.files, p.boot, p.fail);
+    case 'addItem':
+      return addItem({
+        title: p.title, type: p.type, url: p.url, duration: p.duration,
+        loops: p.loops, fit: p.fit, text: p.text, heading: p.heading
+      });
+    case 'updateItem':
+      return updateItem({
+        id: p.id, title: p.title, type: p.type, url: p.url,
+        duration: p.duration, active: p.active, loops: p.loops, fit: p.fit,
+        text: p.text, heading: p.heading
+      });
+    case 'deleteItem':
+      return deleteItem(p.id);
+    case 'moveItem':
+      return moveItem(p.id, p.dir);
+    case 'reorderItems':
+      return reorderItems(p.ids);
+
+    // ── Settings & kiosk control ─────────────────────────
+    case 'updateSettings':
+      return updateSettings(p);
+    case 'refreshKiosk':
+      return refreshKiosk();
+    case 'showNow':
+      return showNow(p.id);
+    case 'getStatus':
+      return getStatus();
+    case 'checkEmbed':
+      return checkEmbed(p.url);
+
+    // ── Devices ──────────────────────────────────────────
+    case 'listDevices':
+      return listDevices(caller);
+    case 'removeDevice':
+      return removeDevice(p.id);
+    case 'approveDevice':
+      return approveDevice(p.code);
+    case 'createInvite':
+      return createInvite(p, caller);
+    case 'upgradeDevice':
+      return upgradeDevice(p, caller);
+
+    default:
+      return { success: false, message: 'Unknown action: ' + action };
   }
 }

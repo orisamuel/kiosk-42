@@ -1,6 +1,6 @@
 /**
  * utils.js — shared utilities loaded by every page
- * Provides: apiCall, access code, theme, loading-screen, toast, formatting, sound.
+ * Provides: apiCall, device key, theme, loading-screen, toast, formatting, sound.
  */
 
 // ── Theme ──────────────────────────────────────────────────
@@ -50,16 +50,17 @@ function warmupServer() {
 }
 
 // THE one and only way to call the backend.
-// Always GET with URLSearchParams — keeps CORS simple, no preflight.
+// POST with a form body: the device key rides in the body, never in the URL
+// (where it would end up in logs), and a form body is still a "simple" request,
+// so there is no CORS preflight for Apps Script to trip over.
 async function apiCall(action, params = {}) {
     if (typeof CONFIG === 'undefined') throw new Error('CONFIG not loaded');
     if (!CONFIG.SCRIPT_URL || CONFIG.SCRIPT_URL.includes('PASTE_')) {
         throw new Error('SCRIPT_URL not configured in config.js');
     }
     const key = getAccessKey();
-    const url = CONFIG.SCRIPT_URL + '?' + new URLSearchParams(
-        key ? { action, ...params, key } : { action, ...params });
-    const res = await fetch(url, { redirect: 'follow' });
+    const body = new URLSearchParams(key ? { action, ...params, key } : { action, ...params });
+    const res = await fetch(CONFIG.SCRIPT_URL, { method: 'POST', body, redirect: 'follow' });
     if (!res.ok) throw new Error('Server error: ' + res.status);
     const text = await res.text();
     try { return JSON.parse(text); }
@@ -106,12 +107,12 @@ function showStatus(message, type = 'info', duration = 5000) {
     showToast(message, type, duration);
 }
 
-// ── Access code ────────────────────────────────────────────
-// The backend refuses every call without the access code (see appscript.gs).
-// Each device keeps it in localStorage — the panel and the player share one
-// origin, so a device that has it for one has it for both. It arrives once,
-// through an access link (…#key=CODE), a code typed into the panel, or, for
-// the screen, by being approved from the panel.
+// ── Device key ─────────────────────────────────────────────
+// The backend answers only a connected device (see appscript.gs). Each device
+// makes its own random key and keeps it in localStorage; the server keeps only
+// its hash. A device is connected once: by an invite link, by a code emailed
+// to Ori, or (the screen) by its code being typed into a connected panel. The
+// panel and the player share one origin, so connecting one connects both.
 
 const ACCESS_KEY_STORE = 'kioskKey';
 
@@ -126,14 +127,67 @@ function setAccessKey(k) {
     } catch (_) {}
 }
 
-// Take the code from an access link and wipe it from the address bar, so it
-// isn't left sitting in the tab or in a screenshot.
+// 32 random bytes, base64url: the key this device will be known by.
+function newDeviceKey() {
+    const b = new Uint8Array(32);
+    crypto.getRandomValues(b);
+    return btoa(String.fromCharCode.apply(null, b))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// What this device is called in the panel's device list, unless named.
+function deviceLabel() {
+    const ua = navigator.userAgent || '';
+    if (/iPhone/.test(ua)) return 'iPhone';
+    if (/iPad/.test(ua)) return 'iPad';
+    if (/Android/.test(ua)) return /Mobile/.test(ua) ? 'נייד אנדרואיד' : 'מכשיר אנדרואיד';
+    if (/Macintosh|Mac OS X/.test(ua)) return 'Mac';
+    if (/Windows/.test(ua)) return 'מחשב Windows';
+    return 'מכשיר';
+}
+
+// An old access link (…#key=CODE, the shared code from before device keys).
+// Kept, so the device can trade it for a key of its own while the server still
+// accepts it; wiped from the address bar either way.
 function adoptKeyFromHash() {
     const m = location.hash.match(/[#&]key=([^&]+)/);
     if (!m) return false;
     setAccessKey(decodeURIComponent(m[1]));
     history.replaceState(null, '', location.pathname + location.search);
     return true;
+}
+
+// An invite link (…#invite=TOKEN). Returns the token and wipes it from the
+// address bar, so it isn't left sitting in the tab or in a screenshot.
+function takeInviteFromHash() {
+    const m = location.hash.match(/[#&]invite=([^&]+)/);
+    if (!m) return '';
+    history.replaceState(null, '', location.pathname + location.search);
+    return decodeURIComponent(m[1]);
+}
+
+// The server marks its answers to the old shared code with `legacy`. Swap it
+// for a key of this device's own, once, even with the panel and the player
+// open side by side (the timestamp keeps a second tab from doing it too).
+let keyUpgrade = null;
+function upgradeLegacyKey(kind, name) {
+    if (keyUpgrade) return keyUpgrade;
+    try {
+        if (Date.now() - (parseInt(localStorage.getItem('kioskKeyUpgrade')) || 0) < 30000) {
+            return Promise.resolve(null);
+        }
+        localStorage.setItem('kioskKeyUpgrade', String(Date.now()));
+    } catch (_) {}
+    const legacy = getAccessKey();
+    const fresh = newDeviceKey();
+    keyUpgrade = apiCall('upgradeDevice', { newKey: fresh, kind, name })
+        .then(res => {
+            if (res && res.success && res.device && getAccessKey() === legacy) setAccessKey(fresh);
+            return res;
+        })
+        .catch(() => null)
+        .finally(() => { keyUpgrade = null; });
+    return keyUpgrade;
 }
 
 // ── Formatting ─────────────────────────────────────────────

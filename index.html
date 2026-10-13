@@ -8,7 +8,7 @@
 <!-- ?v= busts the browser cache — bump it when these files change (see player.html). -->
 <link rel="stylesheet" href="styles.css?v=2">
 <script src="config.js?v=2"></script>
-<script src="utils.js?v=2"></script>
+<script src="utils.js?v=3"></script>
 <style>
   /* ── Page-specific ── */
   .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
@@ -179,6 +179,19 @@
 
   .status-line .btn { padding: 6px 12px; font-size: 0.85rem; margin-inline-start: auto; flex-shrink: 0; }
 
+  /* ── Access: lock card and connected devices ── */
+  .inline-form { display: flex; gap: 8px; align-items: stretch; }
+  .inline-form .form-input { flex: 1; min-width: 0; }
+  .inline-form .btn { flex-shrink: 0; white-space: nowrap; }
+  .code-input { direction: ltr; text-align: center; letter-spacing: 0.15em; font-variant-numeric: tabular-nums; }
+  .code-input:placeholder-shown { letter-spacing: normal; }
+  .sub-head { font-weight: 700; font-size: 0.92rem; margin: 18px 0 8px; }
+  .dev-row .dev-kind { flex-shrink: 0; }
+  .dev-row .dev-main { flex: 1; min-width: 0; }
+  .dev-row .dev-seen { display: block; color: var(--text-muted); font-size: 0.75rem; }
+  .dev-row .dev-me { color: var(--accent); font-weight: 700; }
+  .or-line { text-align: center; color: var(--text-muted); font-size: 0.8rem; margin: 16px 0 12px; }
+
   .section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
   .hint { font-size: 0.78rem; color: var(--text-muted); margin-top: 4px; }
   .card + .card { margin-top: 16px; }
@@ -205,19 +218,27 @@
     <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">🌙</button>
   </header>
 
-  <!-- ── No access code on this device ── -->
+  <!-- ── This device isn't connected yet ── -->
   <div class="card" id="lockCard" style="display:none; margin-top: 16px;">
-    <h2 style="font-size:1.1rem; margin-bottom:8px;">🔒 אין גישה מהמכשיר הזה</h2>
-    <p class="hint" style="margin-bottom:14px;">
-      הדרך הקלה: לפתוח את קישור הגישה. מי שכבר מחובר שולח אותו מ"שיתוף גישה" בתחתית העמוד.
-      אפשר גם להדביק כאן את קוד הגישה.
+    <h2 style="font-size:1.1rem; margin-bottom:8px;">🔒 המכשיר הזה עוד לא מחובר</h2>
+    <p class="hint" style="margin-bottom:4px;">
+      הדרך הקלה: קישור גישה ממי שכבר מחובר (אצלו בתחתית העמוד, "מכשירים מחוברים"). פותחים אותו כאן, והמכשיר מחובר.
     </p>
+    <div class="or-line">או קוד חד פעמי במייל לאורי</div>
     <div class="form-group">
-      <input class="form-input" id="keyInput" type="text" dir="ltr" autocomplete="off"
-             autocapitalize="off" spellcheck="false" placeholder="קוד גישה"
-             onkeydown="if (event.key === 'Enter') submitKey()">
+      <input class="form-input" id="pairName" type="text" maxlength="40"
+             placeholder="שם המכשיר (למשל: הנייד של דנה)">
     </div>
-    <button class="btn btn-primary" style="width:100%;" onclick="submitKey()">כניסה</button>
+    <button class="btn btn-secondary" style="width:100%;" id="pairMailBtn" onclick="requestMailCode()">✉️ שליחת קוד לאורי במייל</button>
+    <div class="form-group" style="margin-top:14px;">
+      <div class="inline-form">
+        <input class="form-input code-input" id="keyInput" type="text" inputmode="numeric"
+               autocomplete="one-time-code" autocapitalize="off" spellcheck="false"
+               placeholder="הקוד מהמייל" onkeydown="if (event.key === 'Enter') submitKey()">
+        <button class="btn btn-primary" onclick="submitKey()">חיבור</button>
+      </div>
+      <div class="hint">הקוד תקף ל-10 דקות. אפשר להדביק כאן גם קישור גישה.</div>
+    </div>
   </div>
 
   <div id="appBody">
@@ -308,8 +329,38 @@
       </div>
     </div>
     <button class="btn btn-primary" style="width:100%; margin-top:8px;" onclick="saveSettings()" id="saveSettingsBtn">💾 שמירת הגדרות</button>
-    <button class="btn btn-secondary" style="width:100%; margin-top:10px;" onclick="shareAccess()">🔗 שיתוף גישה לנייד נוסף</button>
-    <div class="hint" style="text-align:center;">מי שפותח את הקישור יכול לשנות את מה שמוצג על המסך</div>
+  </div>
+
+  <!-- ── Connected devices ── -->
+  <div class="card" id="devicesCard">
+    <div class="section-head">
+      <h2 style="font-size:1.1rem;">🔒 מכשירים מחוברים</h2>
+      <span class="badge" id="devCount"></span>
+    </div>
+    <div id="devList" class="hint">טוען...</div>
+
+    <div class="sub-head">📺 חיבור מסך</div>
+    <div class="inline-form">
+      <input class="form-input code-input" id="screenCode" type="text" inputmode="numeric"
+             autocomplete="off" maxlength="7" placeholder="הקוד שעל המסך"
+             onkeydown="if (event.key === 'Enter') approveScreen()">
+      <button class="btn btn-primary" id="screenCodeBtn" onclick="approveScreen()">חיבור</button>
+    </div>
+    <div class="hint">מסך שעוד לא מחובר מציג במסך ההמתנה קוד של 6 ספרות. מקלידים אותו כאן.</div>
+
+    <div class="sub-head">📱 נייד נוסף</div>
+    <div class="inline-form">
+      <input class="form-input" id="inviteName" type="text" maxlength="40" placeholder="למי? למשל: דנה">
+      <button class="btn btn-secondary" id="inviteBtn" onclick="shareInvite()">🔗 קישור גישה</button>
+    </div>
+    <div id="inviteOut" style="display:none; margin-top:10px;">
+      <div class="status-line" id="inviteNote"></div>
+      <div class="inline-form" style="margin-top:8px;">
+        <button class="btn btn-primary" style="flex:1;" id="inviteShareBtn" onclick="inviteShare()">שיתוף</button>
+        <button class="btn btn-secondary" style="flex:1;" onclick="inviteCopy()">העתקה</button>
+      </div>
+    </div>
+    <div class="hint">הקישור עובד פעם אחת, במשך 24 שעות. מי שפותח אותו יכול לשנות את מה שמוצג על המסך.</div>
   </div>
 
   </div><!-- /appBody -->
@@ -496,7 +547,9 @@ let items = [];
 let settings = null;
 let editingId = null;
 let currentType = null;   // the type chosen in the add/edit modal
+let devices = null;       // connected devices, from listDevices
 
+const inviteToken = takeInviteFromHash();
 adoptKeyFromHash();
 warmupServer();
 
@@ -523,6 +576,9 @@ let settingsTouched = false;
                             '#setReloadHour, #setVideoFit, #setMuted, #setClock')
     .forEach(el => el.addEventListener('input', () => { settingsTouched = true; }));
 
+  // Opened from an invite link: connect this device before anything else.
+  if (inviteToken) await useInvite(inviteToken);
+
   const cached = getAccessKey() ? readPanelCache() : null;
   if (cached) {
     items = cached.items;
@@ -534,8 +590,9 @@ let settingsTouched = false;
     updateLoadingProgress('טוען פלייליסט...');
   }
   loadDeviceFiles();
-  // Both calls at once: each one is a few seconds on Apps Script.
+  // All at once: each call is a few seconds on Apps Script.
   refreshStatus();
+  loadDevices();
   try {
     await loadAll({ initial: true });
   } catch (e) {
@@ -554,11 +611,15 @@ let settingsTouched = false;
   setInterval(refreshStatus, 30000);
 })();
 
-// The server said this device has no (valid) code.
+// The server said this device isn't connected.
 class AccessError extends Error {}
 
 function checkAccess(res) {
   if (res && res.auth) { showLock(); throw new AccessError('אין גישה'); }
+  // Still on the old shared code: trade it for a key of this device's own.
+  if (res && res.legacy) {
+    upgradeLegacyKey('panel', deviceLabel()).then(r => { if (r && r.device) loadDevices(); });
+  }
   return res;
 }
 
@@ -568,43 +629,202 @@ function showLock() {
   hideLoadingScreen(0);
 }
 
-async function submitKey() {
-  const input = document.getElementById('keyInput');
-  const k = input.value.trim().replace(/^.*#key=/, '');   // a pasted link works too
-  if (!k) return;
-  setAccessKey(k);
-  try {
-    const res = await apiCall('getStatus');
-    if (res.auth) {
-      setAccessKey('');
-      return showToast('הקוד לא נכון', 'error');
-    }
-  } catch (e) {
-    return showToast('אין חיבור לשרת: ' + e.message, 'error');
-  }
-  input.value = '';
+function unlock() {
   document.getElementById('lockCard').style.display = 'none';
   document.getElementById('appBody').style.display = '';
-  showToast('מחובר ✓', 'success');
+  showToast('המכשיר חובר ✓', 'success');
   refreshStatus();
+  loadDevices();
   loadAll().catch(e => showToast(e.message, 'error'));
 }
 
-// Hand this device's access on as a link (WhatsApp, mail…). The code rides in
-// the #fragment, which browsers never send to any server.
-async function shareAccess() {
-  const key = getAccessKey();
-  if (!key) return showToast('למכשיר הזה אין קוד גישה לשתף', 'warning');
-  const link = location.origin + location.pathname + '#key=' + encodeURIComponent(key);
-  if (navigator.share) {
-    try { await navigator.share({ title: 'גישה לניהול ' + CONFIG.APP_NAME, url: link }); return; }
-    catch (e) { if (e.name === 'AbortError') return; }
+// ── Connecting this device ─────────────────────────────────
+
+function pairNameValue() {
+  return document.getElementById('pairName').value.trim() || deviceLabel();
+}
+
+// Opened from an invite link. A device that already works keeps its own key
+// and the link stays unused; otherwise the link connects it.
+async function useInvite(token) {
+  if (getAccessKey()) {
+    try {
+      const st = await apiCall('getStatus');
+      if (st && st.success) return showToast('המכשיר הזה כבר מחובר · הקישור לא נוצל', 'info', 5000);
+    } catch (_) {}
   }
+  updateLoadingProgress('מחבר את המכשיר...');
+  if (await pairWith({ invite: token })) showToast('המכשיר חובר ✓', 'success');
+}
+
+async function requestMailCode() {
+  const btn = document.getElementById('pairMailBtn');
+  btn.disabled = true;
   try {
-    await navigator.clipboard.writeText(link);
-    showToast('קישור הגישה הועתק', 'success');
+    const res = await apiCall('requestPair', { name: pairNameValue() });
+    if (!res.success) return showToast(res.message || 'שגיאה', 'error', 6000);
+    showToast('נשלח קוד לאורי במייל · תקף ל-10 דקות', 'success', 6000);
+    document.getElementById('keyInput').focus();
+  } catch (e) {
+    showToast('אין חיבור לשרת: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// The connect button takes whatever arrived: the emailed code, a pasted invite
+// link, or the shared code from before device keys (while it still works).
+async function submitKey() {
+  const input = document.getElementById('keyInput');
+  const raw = input.value.trim();
+  if (!raw) return;
+  const invite = raw.match(/[#&]invite=([^&\s]+)/);
+  const oldLink = raw.match(/[#&]key=([^&\s]+)/);
+  const digits = raw.replace(/[\s-]/g, '');
+  let ok;
+  if (invite) ok = await pairWith({ invite: decodeURIComponent(invite[1]) });
+  else if (/^\d{6}$/.test(digits)) ok = await pairWith({ code: digits });
+  else ok = await tryOldCode(oldLink ? decodeURIComponent(oldLink[1]) : raw);
+  if (!ok) return;
+  input.value = '';
+  unlock();
+}
+
+// Connect with an emailed code or an invite. The key is made here, and the
+// server keeps only its hash.
+async function pairWith(how) {
+  const key = newDeviceKey();
+  let res;
+  try { res = await apiCall('pair', { ...how, newKey: key, name: pairNameValue() }); }
+  catch (e) { showToast('אין חיבור לשרת: ' + e.message, 'error'); return false; }
+  if (!res.success) { showToast(res.message || 'החיבור נכשל', 'error', 6000); return false; }
+  setAccessKey(key);
+  return true;
+}
+
+// The shared code from before device keys, pasted by hand. It works only while
+// the server still takes it, and the next answer trades it for a device key.
+async function tryOldCode(k) {
+  if (k.length < 16) { showToast('הקוד מהמייל הוא 6 ספרות', 'warning'); return false; }
+  const before = getAccessKey();
+  setAccessKey(k);
+  try {
+    const res = await apiCall('getStatus');
+    if (res.success) return true;
+    showToast(res.auth ? 'הקוד לא נכון' : (res.message || 'שגיאה'), 'error');
+  } catch (e) {
+    showToast('אין חיבור לשרת: ' + e.message, 'error');
+  }
+  setAccessKey(before);
+  return false;
+}
+
+// ── Connected devices ──────────────────────────────────────
+
+// The server from before device keys doesn't know these actions yet.
+function serverTooOld(res) {
+  return /Unknown action/i.test((res && res.message) || '') ? 'זמין אחרי עדכון השרת' : '';
+}
+
+async function loadDevices() {
+  const box = document.getElementById('devList');
+  let res;
+  try { res = checkAccess(await apiCall('listDevices')); }
+  catch (_) { return; }
+  if (!res.success) {
+    box.className = 'hint';
+    box.textContent = serverTooOld(res) || res.message || 'שגיאה';
+    return;
+  }
+  devices = res.devices || [];
+  renderDevices();
+}
+
+function renderDevices() {
+  const box = document.getElementById('devList');
+  document.getElementById('devCount').textContent = devices.length || '';
+  if (!devices.length) {
+    box.className = 'hint';
+    box.textContent = 'עוד אין מכשירים עם מפתח משלהם.';
+    return;
+  }
+  box.className = '';
+  box.innerHTML = devices.map(d =>
+    '<div class="dev-row">' +
+      '<span class="dev-kind">' + (d.kind === 'screen' ? '📺' : '📱') + '</span>' +
+      '<span class="dev-main">' +
+        '<span class="dev-name" style="display:block;">' + esc(d.name) + '</span>' +
+        '<span class="dev-seen">נראה ' + esc(seenText(d.seen || d.since)) +
+          (d.me ? ' · <span class="dev-me">המכשיר הזה</span>' : '') + '</span>' +
+      '</span>' +
+      '<button class="icon-btn" title="ניתוק" data-id="' + esc(d.id) + '" ' +
+        'onclick="removeDevice(this.dataset.id)">🗑️</button>' +
+    '</div>').join('');
+}
+
+function seenText(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  const days = Math.round((new Date(new Date().toDateString()) - new Date(d.toDateString())) / 86400000);
+  if (days <= 0) return 'היום ' + formatTime(ts);
+  if (days === 1) return 'אתמול';
+  if (days < 30) return 'לפני ' + days + ' ימים';
+  return d.toLocaleDateString('he-IL');
+}
+
+async function removeDevice(id) {
+  const d = (devices || []).find(x => x.id === id);
+  if (!d) return;
+  const ask = d.me
+    ? 'לנתק את המכשיר הזה? כדי לחזור צריך לחבר אותו מחדש, בקישור או בקוד במייל.'
+    : 'לנתק את "' + d.name + '"? ' + (d.kind === 'screen'
+        ? 'המסך ימשיך להציג את מה שהיה לו, ויציג קוד לחיבור מחדש.'
+        : 'הוא יפסיק לעבוד מיד.');
+  if (!confirm(ask)) return;
+  let res;
+  try { res = checkAccess(await apiCall('removeDevice', { id })); }
+  catch (e) { if (!(e instanceof AccessError)) showToast(e.message, 'error'); return; }
+  if (!res.success) return showToast(res.message || 'שגיאה', 'error');
+  showToast('המכשיר נותק', 'success');
+  if (d.me) { setAccessKey(''); showLock(); return; }
+  loadDevices();
+}
+
+// ── Invite link for another phone ──
+// Made on the server (one use, 24 hours), then shared with a tap of its own:
+// phones only allow the share sheet straight from a tap, not seconds later.
+let inviteLink = '';
+
+async function shareInvite() {
+  const btn = document.getElementById('inviteBtn');
+  const nameEl = document.getElementById('inviteName');
+  btn.disabled = true;
+  let res;
+  try { res = checkAccess(await apiCall('createInvite', { name: nameEl.value.trim() })); }
+  catch (e) { if (!(e instanceof AccessError)) showToast(e.message, 'error'); return; }
+  finally { btn.disabled = false; }
+  if (!res.success) return showToast(serverTooOld(res) || res.message || 'שגיאה', 'error');
+  // The invite rides in the #fragment, which browsers never send to a server.
+  inviteLink = location.origin + location.pathname + '#invite=' + encodeURIComponent(res.invite);
+  const who = nameEl.value.trim();
+  nameEl.value = '';
+  document.getElementById('inviteNote').textContent =
+    '🔗 קישור מוכן' + (who ? ' ל' + who : '') + ' · עובד פעם אחת, עד מחר באותה שעה';
+  document.getElementById('inviteShareBtn').style.display = navigator.share ? '' : 'none';
+  document.getElementById('inviteOut').style.display = '';
+}
+
+async function inviteShare() {
+  try { await navigator.share({ title: 'גישה לניהול ' + CONFIG.APP_NAME, url: inviteLink }); }
+  catch (e) { if (e.name !== 'AbortError') inviteCopy(); }
+}
+
+async function inviteCopy() {
+  try {
+    await navigator.clipboard.writeText(inviteLink);
+    showToast('הקישור הועתק', 'success');
   } catch (_) {
-    prompt('קישור הגישה:', link);
+    prompt('קישור הגישה:', inviteLink);
   }
 }
 
@@ -1495,37 +1715,51 @@ async function refreshStatus() {
   }
 }
 
-// ── Pairing a screen ───────────────────────────────────────
-// A screen without the access code keeps playing what it last had and asks to
-// be let in. Its code (last 5 characters) is on its waiting board, so the
-// request can be matched to the actual screen before approving.
+// ── Connecting a screen ────────────────────────────────────
+// A screen with no key keeps playing what it last had and shows a 6-digit
+// code on its waiting board. The code is typed here, never shown here: typing
+// it proves you are looking at that screen, so a request from anywhere else
+// can't be let in by a tap.
 const PAIR_FRESH_MS = 3 * 60 * 1000;
 
 function showPairRequest(p) {
   const el = document.getElementById('pairLine');
-  const fresh = p && p.boot && p.boot !== kioskBoot && Date.now() - p.ts < PAIR_FRESH_MS;
+  const fresh = p && p.ts && p.boot !== kioskBoot && Date.now() - p.ts < PAIR_FRESH_MS;
   if (!fresh) { el.style.display = 'none'; return; }
   el.style.display = '';
-  el.innerHTML = '<span>📺 מסך מבקש חיבור · קוד <b dir="ltr">' + esc(p.boot.slice(-5)) +
-    '</b> (מופיע על מסך ההמתנה שלו)</span>' +
-    '<button class="btn btn-primary" data-boot="' + esc(p.boot) + '" ' +
-    'onclick="approveScreen(this.dataset.boot, this)">חיבור</button>';
+  el.innerHTML = '<span>📺 מסך מבקש חיבור · הקוד מופיע עליו</span>' +
+    '<button class="btn btn-primary" onclick="focusScreenCode()">להקלדת הקוד</button>';
 }
 
-async function approveScreen(boot, btn) {
+function focusScreenCode() {
+  const input = document.getElementById('screenCode');
+  input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  setTimeout(() => input.focus({ preventScroll: true }), 350);
+}
+
+async function approveScreen() {
+  const input = document.getElementById('screenCode');
+  const btn = document.getElementById('screenCodeBtn');
+  const code = input.value.replace(/\D/g, '');
+  if (code.length !== 6) return showToast('הקוד שעל המסך הוא 6 ספרות', 'warning');
   btn.disabled = true;
-  try {
-    const res = checkAccess(await apiCall('approveScreen', { boot }));
-    if (!res.success) throw new Error(res.message || 'שגיאה');
-  } catch (e) {
+  let res;
+  try { res = checkAccess(await apiCall('approveDevice', { code })); }
+  catch (e) { btn.disabled = false; if (!(e instanceof AccessError)) showToast(e.message, 'error'); return; }
+  if (!res.success) {
     btn.disabled = false;
-    return showToast(e.message, 'error');
+    return showToast(serverTooOld(res) || res.message || 'שגיאה', 'error', 7000);
   }
+  input.value = '';
+  showPairRequest(null);
+  loadDevices();
+  showToast('הקוד אושר · המסך יתחבר בבדיקה הבאה שלו, תוך כמה שניות', 'success', 5000);
   btn.textContent = '⏳ ממתין למסך...';
-  const every = (settings && settings.refreshSeconds) || 60;
-  const ok = await waitForScreen(st => st.boot === boot, every + 25);
-  showToast(ok ? 'המסך חובר ✓' : 'המסך עוד לא התחבר · אם הנגן פתוח, זה יקרה בבדיקה הבאה שלו',
-            ok ? 'success' : 'warning', 7000);
+  const ok = res.boot && await waitForScreen(st => st.boot === res.boot, 60);
+  btn.textContent = 'חיבור';
+  btn.disabled = false;
+  showToast(ok ? 'המסך חובר ומציג את הפלייליסט ✓' : 'המסך חובר · הוא יתעדכן בבדיקה הבאה שלו',
+            ok ? 'success' : 'info', 7000);
   refreshStatus();
 }
 
