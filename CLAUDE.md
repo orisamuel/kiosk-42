@@ -9,7 +9,7 @@
 - נגן (ה-Start URL ב-Fully): https://orisamuel.github.io/kiosk-42/player.html
 - ריפו (ציבורי, בגלל Pages): https://github.com/orisamuel/kiosk-42
 - גיליון: https://docs.google.com/spreadsheets/d/1sBuKpJyIpA_yZzQB0zIo9zQaM1Yb-ZZpE638tQRk3d4/edit
-- Apps Script: פרויקט "הקיוסק של 42 - Backend", Web App (Execute as Me, Anyone). ה-deployment של הייצור: `AKfycbyvbwOZEVuVCjwOGMkzfcm9mpEnYMSYGL2AQoV7xTHlEVrhi_wMy_F_n4mBjhlxZIrp` (הכתובת שב-`config.js`).
+- Apps Script: פרויקט "הקיוסק של 42 - Backend", Web App (Execute as Me, Anyone). ה-deployment של הייצור: `AKfycbyvbwOZEVuVCjwOGMkzfcm9mpEnYMSYGL2AQoV7xTHlEVrhi_wMy_F_n4mBjhlxZIrp` (הכתובת שב-`config.js`). מ-13/10/2026 רץ עליו גרסה 13 (מפתח לכל מכשיר).
 
 ## קבצים
 - `player.html`: הנגן. `player.html?preview=1` הוא מצב תצוגה מקדימה שדף הניהול טוען ב-iframe (בלי polling, בלי heartbeat).
@@ -18,7 +18,7 @@
 - `utils.js`, `config.js`, `styles.css`: משותפים. כשמשנים אותם מעלים את `?v=` בתגיות ב-`index.html` וב-`player.html`. אחרת reload של המסך מביא דף חדש עם סקריפט ישן מהמטמון.
 - `assets/`: אמנות הסטודיו (לוחות 9:16). המקורות ב-`source-art/`, מחוץ לגיט.
 - `dev/local-server.mjs`: שרת בדיקה מקומי. מריץ את `appscript.gs` עצמו ב-Node על גיליון, מטמון ו-Script Properties בזיכרון, ומגיש את האתר ב-`http://127.0.0.1:8124/` (`.claude/launch.json`: `kiosk-local`). קודי מייל מודפסים בטרמינל ונמצאים ב-`/dev/outbox`. `KIOSK_GS=<קובץ>` מריץ גרסת שרת אחרת (למשל זו שבייצור, מ-`git show`) כדי לבדוק פרונט חדש מולה.
-- `.env` (מחוץ לגיט): `KIOSK_KEY`, הקוד המשותף הישן (עד 20/10/2026), ו-`KIOSK_DEVICE_KEY`, המפתח של המכשיר "Claude" לבדיקות מול הייצור.
+- `.env` (מחוץ לגיט): `KIOSK_DEVICE_KEY`, המפתח של המכשיר "Claude (המחשב של אורי)" לבדיקות מול הייצור, ו-`KIOSK_KEY`, הקוד המשותף הישן, שבוטל ב-13/10/2026 ולא פותח כלום.
 
 ## פריסה
 - פרונט: commit ו-`git push` ל-main. GitHub Pages מתעדכן תוך כדקה. `_config.yml` מחריג קבצים פנימיים מהאתר.
@@ -44,7 +44,7 @@
 - הבעלים מקבל מייל על כל מכשיר שמתחבר בקישור או בקוד מסך.
 - מכשיר מסוג מסך משנה תוכן (גם מנהל הקבצים שעליו), אבל לא מנהל מכשירים (`PHONE_ONLY`: רשימה, ניתוק, חיבור מסך, הזמנות, ביטול הקוד הישן). המפתח שלו הכי חשוף: הוא על הקיר, ודף הניהול נפתח עליו מפינה נסתרת.
 - ניתוק: 🗑️ ב"מכשירים מחוברים". אין קוד משותף להחליף. בלי נייד מחובר ביד: קוד במייל, או `ownerInvite` בעורך (מדפיס קישור הזמנה ליומן, ואי אפשר לחסום אותו מבחוץ).
-- הקוד המשותף הישן (`KEY_HASH` בקוד, `KIOSK_KEY` ב-`.env`) עובד עד 20/10/2026 כולל (`LEGACY_UNTIL`), או עד `retireLegacy` מנייד מחובר. תשובות אליו מסומנות `legacy`, כדי שמכשיר שמחזיק אותו יחליף אותו לבד למפתח משלו (`upgradeDevice`). קישור `#key=` ישן נלקח רק במכשיר בלי מפתח. אחרי התאריך אפשר למחוק את `KEY_HASH`, את `KIOSK_KEY` ואת קוד ה-upgrade.
+- הקוד המשותף הישן (`KEY_HASH` בקוד, `KIOSK_KEY` ב-`.env`) **בוטל ב-13/10/2026** (`retireLegacy`, Script Property `LEGACY_OFF`), אחרי שהמסך, האייפון של אורי ומכשיר הבדיקה עברו למפתח משלהם. עד הביטול תשובות אליו סומנו `legacy`, וכל מכשיר שהחזיק אותו החליף אותו לבד (`upgradeDevice`). גם בלי הביטול הוא היה מת אחרי 20/10/2026 (`LEGACY_UNTIL`). בניקוי הבא אפשר למחוק את `KEY_HASH`, את `KIOSK_KEY` ואת קוד ה-upgrade.
 - כתובות: השרת שומר רק `https://`. יוטיוב ודרייב רק מהדומיינים שלהם (או מזהה). טקסט שמתחיל ב-`= + - @` נשמר עם גרש, כדי שהגיליון לא יקרא אותו כנוסחה. הנגן מדלג על כתובת שאינה https גם אם נכתבה ישר בגיליון.
 - `orisamuel.github.io` משותף לכל האתרים של אורי ב-Pages, וכולם קוראים את אותו localStorage. לכן אתר מאותו origin מוצג בנגן ב-iframe עם sandbox (בלי `allow-same-origin`), ודף הניהול מסרב לרוץ בתוך frame. הגנה מלאה דורשת דומיין נפרד לקיוסק.
 - הודעות קופצות (`showToast`) הן טקסט בלבד: יש בהן תשובות מהשרת וכותרות של אתרים זרים (`checkEmbed`).
